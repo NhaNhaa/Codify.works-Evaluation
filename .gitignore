@@ -1,0 +1,40 @@
+# ── Python ─────────────────────────────────────────────
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# ── Environment ────────────────────────────────────────
+.env
+
+# ── Data (generated at runtime) ────────────────────────
+data/chroma_storage/
+data/outputs/
+logs/
+
+# ── IDE ────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Docker ─────────────────────────────────────────────
+*.tar
+
+# ── OS ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Testing ────────────────────────────────────────────
+.pytest_cache/
+htmlcov/
+.coverage
+
+# ── Temp files ─────────────────────────────────────────
+*.tmp
+*.log

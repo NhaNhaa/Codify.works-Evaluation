@@ -1,0 +1,28 @@
+# ── LLM API CLIENT ─────────────────────────────────────
+openai==1.51.0
+
+# ── VECTOR STORE ───────────────────────────────────────
+chromadb==0.5.0
+
+# ── EMBEDDINGS (local — zero API cost) ─────────────────
+sentence-transformers==3.0.0
+
+# ── WEB FRAMEWORK ──────────────────────────────────────
+fastapi==0.115.0
+uvicorn==0.30.0
+python-multipart==0.0.9
+
+# ── DATA VALIDATION ────────────────────────────────────
+pydantic==2.7.0
+
+# ── ENVIRONMENT & CONFIG ───────────────────────────────
+python-dotenv==1.0.1
+
+# ── OUTPUT FORMATTING ──────────────────────────────────
+markdown==3.6
+
+# ── NUMERICAL COMPUTING (required by sentence-transformers) ────
+numpy==1.26.4
+
+# ── HTTP CLIENT (pinned to fix openai/chromadb conflict) ───────
+httpx==0.27.0

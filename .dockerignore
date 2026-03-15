@@ -1,0 +1,12 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.git/
+.pytest_cache/
+data/chroma_storage/
+data/outputs/
+logs/
+*.egg-info/
+.env
+node_modules/
