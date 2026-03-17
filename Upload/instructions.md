@@ -7,3 +7,9 @@ The first element becomes the last.
 ## INPUT-OUTPUT
 1, 2, 3, 4, 5  ->  2, 3, 4, 5, 1
 10, 9, 8, 7, 6  ->  9, 8, 7, 6, 10
+
+## MICRO SKILLS TO EVALUATE
+- Be able to access array elements using index (arr[i])
+- Use scanf to read 5 integers into an array
+- Be able to shift elements, using arr[i-1] and handle the 1st cell
+- Avoid losing data during shifting, using a temporary variable
