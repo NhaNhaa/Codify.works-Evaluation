@@ -42,14 +42,12 @@ Codify.works
 │  │  └─ skill_parser.py
 │  └─ __init__.py
 ├─ data
-│  ├─ inputs
-│  │  ├─ instructions.md
-│  │  ├─ starter_code.c
-│  │  ├─ students
-│  │  │  └─ student_01.c
-│  │  └─ teacher_correction_code.c
-│  └─ templates
-│     └─ LAB_NEW_01.json
+│  └─ inputs
+│     ├─ instructions.md
+│     ├─ starter_code.c
+│     ├─ students
+│     │  └─ student_01.c
+│     └─ teacher_correction_code.c
 ├─ docker
 │  └─ Dockerfile
 ├─ frontend
