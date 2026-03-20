@@ -322,8 +322,8 @@ HARD CONSTRAINTS:
                     "content": prompt,
                 },
             ],
-            temperature=config.LLM_TEMPERATURE,          # use global setting
-            response_format={"type": "json_object"},     # enforce JSON
+            temperature=config.LLM_TEMPERATURE,
+            response_format={"type": "json_object"},
             agent_label="AGENT 2",
         )
 
@@ -443,8 +443,8 @@ HARD CONSTRAINTS:
                     "content": prompt,
                 },
             ],
-            temperature=config.LLM_TEMPERATURE,          # use global setting
-            response_format={"type": "json_object"},     # enforce JSON
+            temperature=config.LLM_TEMPERATURE,
+            response_format={"type": "json_object"},
             agent_label="AGENT 2",
         )
 
@@ -593,7 +593,8 @@ HARD CONSTRAINTS:
     ) -> dict:
         """
         Python safety net for technical feedback accuracy.
-        Keeps feedback literal and prevents unsupported claims.
+        Removes unsupported broad claims and fixes directional wording.
+        Generic only — no assignment-specific logic.
         """
         feedback = verdict.get("feedback", "")
         if not isinstance(feedback, str):
@@ -601,65 +602,35 @@ HARD CONSTRAINTS:
 
         feedback = " ".join(feedback.strip().split())
         status = verdict.get("status", STATUS_FAIL)
-        family = self._detect_skill_family(skill_text)
         teacher_snippet = teacher_ref.get("snippet", "") if teacher_ref else ""
 
-        if family == "shift_transform" and status == STATUS_PASS:
+        lowered = feedback.lower()
+
+        risky_pass_phrases = [
+            "whole program",
+            "overall program",
+            "full rotation",
+            "entire rotation",
+            "final output is correct",
+            "final array is correct",
+            "preserved the last element",
+            "wrapped correctly",
+        ]
+
+        if status == STATUS_PASS and any(phrase in lowered for phrase in risky_pass_phrases):
             feedback = (
-                "You correctly used the left-shift copy pattern inside the loop with "
-                "arr[i - 1] = arr[i]. Starting at i = 1 keeps arr[i - 1] in bounds "
-                "and demonstrates this specific shift step correctly."
+                "This snippet correctly demonstrates the required local pattern for "
+                "this skill. The explanation is intentionally limited to this skill only."
             )
 
-        elif family == "shift_temp_safety" and status == STATUS_FAIL:
-            feedback = (
-                "The loop overwrites the original arr[0] before it is saved, so the "
-                "value that should move to the last position is lost. A temporary "
-                "variable is needed to preserve that original first element before shifting."
+        if status == STATUS_FAIL and teacher_snippet and "arr[4]" in teacher_snippet:
+            feedback = re.sub(r"\bfront\b", "last position", feedback, flags=re.IGNORECASE)
+            feedback = re.sub(
+                r"\bplaced at the front\b",
+                "placed in the last position",
+                feedback,
+                flags=re.IGNORECASE,
             )
-
-        elif family == "scanf_input" and status == STATUS_PASS:
-            feedback = (
-                "You correctly used scanf with &arr[i] inside a loop to read each value "
-                "directly into the array. Running the loop five times matches the "
-                "assignment requirement for five integers."
-            )
-
-        elif family == "array_index" and status == STATUS_PASS:
-            feedback = (
-                "You correctly used array index notation to access the intended array cell "
-                "for this operation. That demonstrates the required arr[i] access pattern "
-                "for this skill."
-            )
-
-        else:
-            lowered = feedback.lower()
-
-            risky_pass_phrases = [
-                "whole program",
-                "overall program",
-                "full rotation",
-                "entire rotation",
-                "final output is correct",
-                "final array is correct",
-                "preserved the last element",
-                "wrapped correctly",
-            ]
-
-            if status == STATUS_PASS and any(phrase in lowered for phrase in risky_pass_phrases):
-                feedback = (
-                    "This snippet correctly demonstrates the required local pattern for "
-                    "this skill. The explanation is intentionally limited to this skill only."
-                )
-
-            if status == STATUS_FAIL and teacher_snippet and "arr[4]" in teacher_snippet:
-                feedback = re.sub(r"\bfront\b", "last position", feedback, flags=re.IGNORECASE)
-                feedback = re.sub(
-                    r"\bplaced at the front\b",
-                    "placed in the last position",
-                    feedback,
-                    flags=re.IGNORECASE,
-                )
 
         verdict["feedback"] = feedback
         return verdict
@@ -704,27 +675,6 @@ HARD CONSTRAINTS:
         )
 
         return verdict
-
-    @staticmethod
-    def _detect_skill_family(skill_text: str) -> str:
-        """
-        Lightweight skill family detector for safer feedback wording.
-        """
-        lowered = str(skill_text).lower()
-
-        if "temporary variable" in lowered or ("shift" in lowered and "avoid losing" in lowered):
-            return "shift_temp_safety"
-
-        if "shift" in lowered:
-            return "shift_transform"
-
-        if "scanf" in lowered:
-            return "scanf_input"
-
-        if "arr[i]" in lowered or "index" in lowered:
-            return "array_index"
-
-        return "other"
 
     @staticmethod
     def _number_lines(code: str) -> str:

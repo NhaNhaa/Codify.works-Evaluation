@@ -39,7 +39,7 @@ SKILL_QUALITY_RULES = [
     "No two skills may evaluate the same lines of student code.",
     "Generic programming skills (loops, variables, functions) are NOT valid unless they are the specific focus of this assignment.",
     "Output/display skills (printf) are NOT valid unless explicitly listed as a learning objective in instructions.md.",
-    "Skill text must be one clean sentence — maximum 12 words. No reasoning, no comparisons, no explanations inside the skill text.",
+    "Skill text must be one clean sentence — maximum 15 words. No reasoning, no comparisons, no explanations inside the skill text.",
 ]
 
 # ── AGENT RE-EVALUATION & SELF-CHECK ───────────────────────────────
