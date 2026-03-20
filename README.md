@@ -50,8 +50,8 @@ Teacher uploads files → AI extracts skills → Students submit code → AI eva
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/Codify.works.git
-cd Codify.works
+git clone https://github.com/NhaNhaa/Codify.works-Evaluation.git
+cd Codify.works-Evaluation
 ```
 
 ### 2. Create virtual environment
@@ -92,7 +92,6 @@ GROQ_API_KEY=your_groq_api_key_here
 AGENT1_MODEL=moonshotai/kimi-k2-instruct
 AGENT2_MODEL=moonshotai/kimi-k2-instruct
 AGENT3_MODEL=moonshotai/kimi-k2-instruct
-CHROMA_DB_PATH=data/chroma_storage
 ```
 
 > **Minimum requirement:** Only `GROQ_API_KEY` is needed to start.
@@ -211,7 +210,7 @@ curl -X DELETE http://localhost:8000/assignment/lab_01
 ### Build the container
 
 ```bash
-docker build -f docker/Dockerfile -t codify-evaluation-c .
+docker build -f docker/Dockerfile -t codify-evaluation .
 ```
 
 ### Run the container
@@ -234,7 +233,7 @@ This service is designed to run alongside the Codify Backend as a Docker microse
 ParentFolder/
 ├── Codify-Backend/          ← NestJS backend
 │   └── docker-compose.yaml  ← includes codify_evaluation service
-├── Codify.works/            ← This repository
+├── Codify.works-Evaluation/ ← This repository
 │   ├── docker/
 │   │   └── Dockerfile
 │   └── .env
@@ -255,8 +254,6 @@ docker-compose up --build
 
 The NestJS backend calls AutoEval-C internally via `http://codify_evaluation:8000`.
 No external port needed in production — remove `ports: - "8000:8000"` from docker-compose.
-
-See [AUTOEVAL_INTEGRATION.md](AUTOEVAL_INTEGRATION.md) for the full API contract.
 
 ---
 
@@ -297,35 +294,35 @@ See [AUTOEVAL_INTEGRATION.md](AUTOEVAL_INTEGRATION.md) for the full API contract
 
 11 free API slots for unlimited debugging. No credit card required.
 
-| Slot | Provider   | Model                              | Limit            |
-|------|------------|------------------------------------|------------------|
-| 1    | Groq       | moonshotai/kimi-k2-instruct        | 60 RPM           |
-| 2    | Groq       | qwen/qwen3-32b                     | 60 RPM           |
-| 3    | Groq       | llama-3.3-70b-versatile            | 30 RPM           |
-| 4    | Groq       | openai/gpt-oss-120b               | 30 RPM           |
-| 5    | Groq       | openai/gpt-oss-20b                | 30 RPM           |
-| 6    | Groq       | llama-4-scout-17b-16e-instruct     | 30 RPM           |
-| 7    | Groq       | llama-3.1-8b-instant              | 30 RPM / 14.4K RPD |
-| 8    | Cerebras   | qwen-3-235b-a22b-instruct-2507    | ~1M tokens/day   |
-| 9    | SambaNova  | Meta-Llama-3.3-70B-Instruct       | 20 RPM           |
-| 10   | StepFun    | step-3.5-flash                     | Own free pool    |
-| 11   | OpenRouter | arcee-ai/trinity-large-preview:free | 50 RPD shared   |
+| Slot | Provider   | Model                              | Limit             |
+|------|------------|------------------------------------|-------------------|
+| 1    | Groq       | moonshotai/kimi-k2-instruct        | 60 RPM            |
+| 2    | Groq       | llama-3.3-70b-versatile            | 30 RPM            |
+| 3    | Groq       | openai/gpt-oss-120b                | 30 RPM            |
+| 4    | Groq       | openai/gpt-oss-20b                 | 30 RPM            |
+| 5    | Groq       | llama-4-scout-17b-16e-instruct     | 30 RPM            |
+| 6    | Groq       | llama-3.1-8b-instant               | 30 RPM / 14.4K RPD|
+| 7    | Cerebras   | qwen-3-235b-a22b-instruct-2507     | ~1M tokens/day    |
+| 8    | SambaNova  | Meta-Llama-3.3-70B-Instruct        | 20 RPM            |
+| 9    | StepFun    | step-3.5-flash                     | Own free pool     |
+| 10   | OpenRouter | arcee-ai/trinity-large-preview:free| 50 RPD shared     |
 
 **To switch models:** Change `AGENT1_MODEL`, `AGENT2_MODEL`, `AGENT3_MODEL` in `.env`.
 Groq slots 1-7 use the same API key — only the model name changes.
 
-### Test all slots
+### Measure token consumption
 
 ```bash
-python -m backend.tests.test_llm_quota
+python -m backend.tests.test_llm_full_run_usage
 ```
+A report will be generated in `data/outputs/diagnostics/` with JSON and Markdown details.
 
 ---
 
 ## Project Structure
 
 ```
-Codify.works
+Codify.works-Evaluation
 ├─ .dockerignore
 ├─ backend
 │  ├─ agents
