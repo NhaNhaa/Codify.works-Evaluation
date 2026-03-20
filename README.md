@@ -3,7 +3,7 @@
 AI-powered C code evaluation system that replaces time-consuming manual grading.
 Built with FastAPI, ChromaDB, and constrained AI agents.
 
-No scoring — qualitative feedback only.
+**No scoring — qualitative feedback only.**
 
 ---
 
@@ -25,7 +25,7 @@ Teacher uploads files → AI extracts skills → Students submit code → AI eva
 | Component        | Technology                          |
 |------------------|-------------------------------------|
 | API Framework    | FastAPI + Swagger (Python)          |
-| AI Models        | Groq / Cerebras / SambaNova (free)  |
+| AI Models        | Groq / Cerebras / Mistral / Zhipu / Cloudflare (all free) |
 | Vector Database  | ChromaDB (local, persistent)        |
 | Embeddings       | sentence-transformers (local, free) |
 | Server           | Uvicorn                             |
@@ -38,10 +38,11 @@ Teacher uploads files → AI extracts skills → Students submit code → AI eva
 - **Docker Desktop** (for containerized deployment)
 - **Git**
 - **Free API key** from at least one provider:
-  - [Groq](https://console.groq.com) (recommended — 7 model slots)
+  - [Groq](https://console.groq.com) (recommended – 5 model slots)
   - [Cerebras](https://cloud.cerebras.ai)
-  - [SambaNova](https://cloud.sambanova.ai)
-  - [OpenRouter](https://openrouter.ai)
+  - [Mistral](https://console.mistral.ai)
+  - [Zhipu](https://open.bigmodel.cn) (Asia region)
+  - [Cloudflare](https://developers.cloudflare.com/workers-ai/) (edge)
 
 ---
 
@@ -84,7 +85,7 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` and add your API key(s):
+Edit `.env` and add your API key(s). At minimum, set `GROQ_API_KEY` and leave the provider as `groq`.
 
 ```env
 LLM_PROVIDER=groq
@@ -94,8 +95,7 @@ AGENT2_MODEL=moonshotai/kimi-k2-instruct
 AGENT3_MODEL=moonshotai/kimi-k2-instruct
 ```
 
-> **Minimum requirement:** Only `GROQ_API_KEY` is needed to start.
-> Other provider keys are optional backup slots.
+> Other provider keys are optional and only needed if you plan to rotate through fallback slots.
 
 ### 5. Start the server
 
@@ -290,25 +290,39 @@ No external port needed in production — remove `ports: - "8000:8000"` from doc
 
 ---
 
-## Free API Rotation Strategy
+## Free API Rotation Strategy – Verified Providers (March 2026)
 
-11 free API slots for unlimited debugging. No credit card required.
+All listed providers **do not train on your data**, have **daily‑refreshed free quotas**, support **JSON mode** and **temperature=0.1**, and produce **no thinking tags**. Change `LLM_PROVIDER` and the model lines in `.env` to switch slots.
 
-| Slot | Provider   | Model                              | Limit             |
-|------|------------|------------------------------------|-------------------|
-| 1    | Groq       | moonshotai/kimi-k2-instruct        | 60 RPM            |
-| 2    | Groq       | llama-3.3-70b-versatile            | 30 RPM            |
-| 3    | Groq       | openai/gpt-oss-120b                | 30 RPM            |
-| 4    | Groq       | openai/gpt-oss-20b                 | 30 RPM            |
-| 5    | Groq       | llama-4-scout-17b-16e-instruct     | 30 RPM            |
-| 6    | Groq       | llama-3.1-8b-instant               | 30 RPM / 14.4K RPD|
-| 7    | Cerebras   | qwen-3-235b-a22b-instruct-2507     | ~1M tokens/day    |
-| 8    | SambaNova  | Meta-Llama-3.3-70B-Instruct        | 20 RPM            |
-| 9    | StepFun    | step-3.5-flash                     | Own free pool     |
-| 10   | OpenRouter | arcee-ai/trinity-large-preview:free| 50 RPD shared     |
+| Slot | Provider   | Model                                      | Daily Limit      | Notes                                  |
+|------|------------|--------------------------------------------|------------------|----------------------------------------|
+| 1    | Groq       | `moonshotai/kimi-k2-instruct`              | 60 RPM / 1K RPD  | Default – best C code eval + JSON     |
+| 2    | Groq       | `openai/gpt-oss-120b`                      | 30 RPM / 1K RPD  | GPT‑class output, best for Agent 3    |
+| 3    | Groq       | `llama-3.3-70b-versatile`                  | 30 RPM / 1K RPD  | Stable baseline                       |
+| 4    | Groq       | `meta-llama/llama-4-scout-17b-16e-instruct`| 30 RPM / 1K RPD  | Large context (131K)                   |
+| 5    | Groq       | `openai/gpt-oss-20b`                       | 30 RPM / 1K RPD  | Fastest Groq model                     |
+| 6    | Cerebras   | `gpt-oss-120b`                             | 1M tokens/day    | Highest throughput                     |
+| 7    | Cerebras   | `llama3.1-8b`                              | 1M tokens/day    | Fastest response time                  |
+| 8a   | Mistral    | `mistral-large-latest`                     | ~120 RPM         | Strictest JSON schema compliance       |
+| 8b   | Mistral    | `codestral-latest` + `mistral-large-latest`| ~120 RPM         | Code‑specialised for Agent 1+2         |
+| 9a   | Zhipu      | `glm-4.7-flash`                            | No daily quota   | Unlimited free calls, 128K ctx         |
+| 9b   | Zhipu      | `glm-4.5-flash`                            | No daily quota   | 1M context for very large submissions  |
+| 10   | Cloudflare | `@cf/zai-org/glm-4.7-flash`                | 10K neurons/day  | Last resort – resets daily at 00:00 UTC |
 
-**To switch models:** Change `AGENT1_MODEL`, `AGENT2_MODEL`, `AGENT3_MODEL` in `.env`.
-Groq slots 1-7 use the same API key — only the model name changes.
+**Excluded Providers (Why We Don't Use Them)**
+- ❌ Qwen3 (any) – requires special handling for thinking tags.
+- ❌ StepFun – reasoning model with unavoidable thinking tokens.
+- ❌ SambaNova – low 20 RPM, one‑time credit only.
+- ❌ Google Gemini – free tier data used for training.
+- ❌ OpenRouter – only 50 RPD shared pool.
+- ❌ GitHub Models – 50–150 req/day insufficient.
+- ❌ OpenAI – one‑time $5 credit, no daily refresh.
+- ❌ Anthropic – no free public API tier.
+- ❌ Fireworks – paid only.
+- ❌ SiliconFlow – rate limits unverified.
+- ❌ ByteDance/Doubao – no verified daily‑refresh free API.
+- ❌ Baidu ERNIE – rate limits unverified, outdated models.
+- ❌ NVIDIA NIM – 40 RPM prototyping only.
 
 ### Measure token consumption
 
@@ -404,7 +418,7 @@ python -m pytest backend/tests/ -v
 # Run single test file
 python -m pytest backend/tests/test_12_api.py -v
 
-# Check API quota across all 11 slots
+# Check API quota across all 10 slots
 python -m backend.tests.test_llm_quota
 ```
 
