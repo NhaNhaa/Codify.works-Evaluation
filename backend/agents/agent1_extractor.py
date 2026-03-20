@@ -19,18 +19,19 @@ import json
 
 from openai import OpenAI
 
-from backend.config.config import get_provider_config, get_model
+from backend.agents import agent1_validators as validators
+from backend.config.config import get_model, get_provider_config
 from backend.config.constants import (
-    MIN_MICRO_SKILLS,
     MAX_MICRO_SKILLS,
+    MIN_MICRO_SKILLS,
     SKILL_QUALITY_RULES,
+    TOTAL_WEIGHT_TARGET,
 )
 from backend.rag.rag_pipeline import rag_pipeline
+from backend.utils.llm_client import call_llm_with_retry
 from backend.utils.logger import engine_logger
 from backend.utils.security import safe_read_file
 from backend.utils.skill_parser import extract_skills
-from backend.utils.llm_client import call_llm_with_retry
-from backend.agents import agent1_validators as validators
 
 
 class SkillExtractor:
@@ -47,7 +48,7 @@ class SkillExtractor:
         provider = get_provider_config()
         self.client = OpenAI(
             base_url=provider["base_url"],
-            api_key=provider["api_key"]
+            api_key=provider["api_key"],
         )
         self.model = get_model("agent1_skill_extractor")
         engine_logger.info("AGENT 1: SkillExtractor initialized.")
@@ -58,7 +59,7 @@ class SkillExtractor:
         instructions_path: str,
         starter_path: str,
         teacher_path: str,
-        force_regenerate: bool = False
+        force_regenerate: bool = False,
     ) -> bool:
         """
         Full Phase 1 pipeline.
@@ -76,14 +77,14 @@ class SkillExtractor:
         if assignment_exists and not force_regenerate:
             engine_logger.info(
                 f"AGENT 1: Skills already exist for '{assignment_id}'. "
-                f"Skipping Phase 1."
+                "Skipping Phase 1."
             )
             return True
 
         if assignment_exists and force_regenerate:
             engine_logger.info(
                 f"AGENT 1: force_regenerate=True for '{assignment_id}'. "
-                f"Existing assignment data will be replaced."
+                "Existing assignment data will be replaced."
             )
 
         instructions = safe_read_file(instructions_path, ".md")
@@ -101,7 +102,7 @@ class SkillExtractor:
             engine_logger.error("AGENT 1: instructions.md is invalid or empty. Aborting.")
             return False
 
-        if len(initial_skills) > 0:
+        if initial_skills:
             engine_logger.info(
                 f"AGENT 1: Step 2 complete — {len(initial_skills)} skills "
                 f"({'parser-extracted' if from_parser else 'LLM-generated'})."
@@ -124,7 +125,7 @@ class SkillExtractor:
                 existing_skills=initial_skills,
                 instructions=instructions,
                 starter=starter,
-                teacher=teacher
+                teacher=teacher,
             )
 
         if len(all_skills) < MIN_MICRO_SKILLS:
@@ -142,23 +143,31 @@ class SkillExtractor:
             engine_logger.error("AGENT 1: Ranking and weight assignment failed.")
             return False
 
+        if not self._validate_ranked_skills_before_storage(ranked_skills):
+            engine_logger.error(
+                "AGENT 1: Ranked skill validation failed before ChromaDB write."
+            )
+            return False
+
         engine_logger.info("AGENT 1: Step 7 — Validating skills.")
         self._log_final_skills(ranked_skills)
 
         engine_logger.info("AGENT 1: Step 8 — Generating teacher reference snippets.")
         teacher_refs = self._generate_teacher_references(
             skills=ranked_skills,
-            teacher=teacher
+            teacher=teacher,
         )
 
         if not teacher_refs:
             engine_logger.error("AGENT 1: Teacher reference generation failed.")
             return False
 
-        if len(teacher_refs) != len(ranked_skills):
+        if not self._validate_teacher_references_before_storage(
+            references=teacher_refs,
+            expected_count=len(ranked_skills),
+        ):
             engine_logger.error(
-                f"AGENT 1: Teacher reference count mismatch. "
-                f"Expected {len(ranked_skills)}, got {len(teacher_refs)}."
+                "AGENT 1: Teacher references failed validation before storage."
             )
             return False
 
@@ -167,7 +176,7 @@ class SkillExtractor:
         skills_stored = rag_pipeline.store_micro_skills(
             skills=ranked_skills,
             assignment_id=assignment_id,
-            force_regenerate=force_regenerate
+            force_regenerate=force_regenerate,
         )
 
         if not skills_stored:
@@ -177,7 +186,7 @@ class SkillExtractor:
         refs_stored = rag_pipeline.store_teacher_references(
             references=teacher_refs,
             assignment_id=assignment_id,
-            force_regenerate=force_regenerate
+            force_regenerate=force_regenerate,
         )
 
         if not refs_stored:
@@ -232,7 +241,8 @@ class SkillExtractor:
         Called only when instructions.md contains no extractable list.
         Generates teacher-quality skills from prose description.
         Validates, deduplicates, rejects generic, and filters by assignment context.
-        Returns [] if all skills are rejected — signals cross-check fallback.
+        Returns [] if no usable skills survive — signals cross-check fallback.
+        Returns None only if the LLM request itself fails.
         """
         quality_rules = "\n".join(f"- {rule}" for rule in SKILL_QUALITY_RULES)
 
@@ -279,43 +289,46 @@ ASSIGNMENT DESCRIPTION:
             return None
 
         if len(result) == 0:
-            engine_logger.error(
-                "AGENT 1: Step 2 — LLM could not identify any evaluable skills."
+            engine_logger.warning(
+                "AGENT 1: Step 2 — LLM returned no prose skills. "
+                "Returning [] for cross-check fallback."
             )
-            return None
+            return []
 
         validated = validators.validate_and_fix_skills(result)
         if not validated:
-            engine_logger.error(
-                "AGENT 1: All LLM-generated skills failed formula validation."
+            engine_logger.warning(
+                "AGENT 1: All LLM-generated skills failed formula validation. "
+                "Returning [] for cross-check fallback."
             )
-            return None
+            return []
 
         deduplicated = validators.deduplicate_skills(validated)
         if not deduplicated:
-            engine_logger.error(
-                "AGENT 1: All LLM-generated skills were duplicates."
+            engine_logger.warning(
+                "AGENT 1: All LLM-generated skills were duplicates. "
+                "Returning [] for cross-check fallback."
             )
-            return None
+            return []
 
         non_generic = validators.reject_generic_skills(deduplicated)
         if not non_generic:
             engine_logger.warning(
                 "AGENT 1: All LLM-generated skills were generic. "
-                "Returning empty list for cross-check fallback."
+                "Returning [] for cross-check fallback."
             )
             return []
 
         context_filtered = validators.filter_skills_by_assignment_context(
             skills=non_generic,
-            instructions=instructions
+            instructions=instructions,
         )
         context_filtered = validators.deduplicate_skills(context_filtered)
 
         if not context_filtered:
             engine_logger.warning(
                 "AGENT 1: All LLM-generated skills were rejected by assignment context. "
-                "Returning empty list for cross-check fallback."
+                "Returning [] for cross-check fallback."
             )
             return []
 
@@ -326,7 +339,7 @@ ASSIGNMENT DESCRIPTION:
         existing_skills: list[str],
         instructions: str,
         starter: str,
-        teacher: str
+        teacher: str,
     ) -> list[str]:
         """
         Asks LLM one question: what core skills are missing?
@@ -335,7 +348,7 @@ ASSIGNMENT DESCRIPTION:
         if len(existing_skills) >= MAX_MICRO_SKILLS:
             engine_logger.info(
                 f"AGENT 1: Already at {MAX_MICRO_SKILLS} skills. "
-                f"Skipping cross-check."
+                "Skipping cross-check."
             )
             return list(existing_skills)
 
@@ -351,7 +364,8 @@ ASSIGNMENT DESCRIPTION:
             f"Review the starter code and teacher solution below.\n"
             f"Are there any CORE ALGORITHMIC skills missing that are NOT already\n"
             f"covered by any of the {len(existing_skills)} skills above?"
-            if existing_skills else
+            if existing_skills
+            else
             "No micro skills have been defined yet for this C assignment.\n\n"
             "Review the starter code and teacher solution below.\n"
             "Generate the CORE ALGORITHMIC skills needed to evaluate\n"
@@ -410,7 +424,7 @@ ASSIGNMENT INSTRUCTIONS:
         non_generic_new = validators.reject_generic_skills(deduplicated_new)
         context_filtered_new = validators.filter_skills_by_assignment_context(
             skills=non_generic_new,
-            instructions=instructions
+            instructions=instructions,
         )
         context_filtered_new = validators.deduplicate_skills(context_filtered_new)
 
@@ -471,7 +485,7 @@ ASSIGNMENT INSTRUCTIONS:
     def _generate_teacher_references(
         self,
         skills: list[dict],
-        teacher: str
+        teacher: str,
     ) -> list[dict]:
         """
         Generates teacher reference snippet per micro skill
@@ -517,7 +531,8 @@ HARD CONSTRAINTS:
                 client=self.client,
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                agent_label="AGENT 1"
+                response_format={"type": "json_object"},
+                agent_label="AGENT 1",
             )
 
             if content is None:
@@ -534,8 +549,8 @@ HARD CONSTRAINTS:
                     ref_data.get("snippet", "")
                 ).strip()
 
-                line_start = ref_data.get("line_start", 0)
-                line_end = ref_data.get("line_end", 0)
+                line_start = self._to_positive_int(ref_data.get("line_start"))
+                line_end = self._to_positive_int(ref_data.get("line_end"))
 
                 if not snippet:
                     engine_logger.error(
@@ -543,35 +558,37 @@ HARD CONSTRAINTS:
                     )
                     return []
 
-                if not isinstance(line_start, int) or not isinstance(line_end, int):
+                if line_start is None or line_end is None:
                     engine_logger.error(
                         f"AGENT 1: Invalid teacher line numbers for rank {skill['rank']}."
                     )
                     return []
 
-                if line_start <= 0 or line_end <= 0 or line_start > line_end:
+                if line_start > line_end:
                     engine_logger.error(
                         f"AGENT 1: Teacher line range invalid for rank {skill['rank']}: "
                         f"{line_start}-{line_end}"
                     )
                     return []
 
-                references.append({
-                    "rank": skill["rank"],
-                    "snippet": snippet,
-                    "line_start": line_start,
-                    "line_end": line_end
-                })
+                references.append(
+                    {
+                        "rank": skill["rank"],
+                        "snippet": snippet,
+                        "line_start": line_start,
+                        "line_end": line_end,
+                    }
+                )
 
                 engine_logger.info(
                     f"AGENT 1: Teacher reference generated for "
                     f"skill rank {skill['rank']}."
                 )
 
-            except Exception as e:
+            except Exception as exc:
                 engine_logger.error(
                     f"AGENT 1: Teacher reference parsing failed "
-                    f"for rank {skill['rank']}: {e}"
+                    f"for rank {skill['rank']}: {exc}"
                 )
                 return []
 
@@ -586,7 +603,8 @@ HARD CONSTRAINTS:
             client=self.client,
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-            agent_label="AGENT 1"
+            response_format={"type": "json_object"},
+            agent_label="AGENT 1",
         )
 
         if content is None:
@@ -615,9 +633,130 @@ HARD CONSTRAINTS:
             )
             return cleaned_result
 
-        except Exception as e:
-            engine_logger.error(f"AGENT 1: JSON parsing failed for {step_label}: {e}")
+        except Exception as exc:
+            engine_logger.error(f"AGENT 1: JSON parsing failed for {step_label}: {exc}")
             return None
+
+    def _validate_ranked_skills_before_storage(self, skills: list[dict]) -> bool:
+        """
+        Final safety check before any ChromaDB write.
+        Ensures weight sum = 10 and each ranked skill has the required fields.
+        """
+        if not isinstance(skills, list) or not skills:
+            engine_logger.error("AGENT 1: Ranked skills payload is invalid or empty.")
+            return False
+
+        seen_ranks = set()
+        total_weight = 0
+
+        for skill in skills:
+            if not isinstance(skill, dict):
+                engine_logger.error("AGENT 1: Ranked skill entry is not a dict.")
+                return False
+
+            text = skill.get("text")
+            rank = skill.get("rank")
+            weight = skill.get("weight")
+
+            if not isinstance(text, str) or not text.strip():
+                engine_logger.error("AGENT 1: Ranked skill text is missing or blank.")
+                return False
+
+            if not isinstance(rank, int) or rank <= 0:
+                engine_logger.error("AGENT 1: Ranked skill rank is invalid.")
+                return False
+
+            if rank in seen_ranks:
+                engine_logger.error("AGENT 1: Ranked skill ranks must be unique.")
+                return False
+
+            if not isinstance(weight, int) or weight <= 0:
+                engine_logger.error("AGENT 1: Ranked skill weight is invalid.")
+                return False
+
+            seen_ranks.add(rank)
+            total_weight += weight
+
+        if total_weight != TOTAL_WEIGHT_TARGET:
+            engine_logger.error(
+                f"AGENT 1: Final weight validation failed — expected "
+                f"{TOTAL_WEIGHT_TARGET}, got {total_weight}."
+            )
+            return False
+
+        return True
+
+    def _validate_teacher_references_before_storage(
+        self,
+        references: list[dict],
+        expected_count: int,
+    ) -> bool:
+        """
+        Final safety check before storing teacher references.
+        """
+        if not isinstance(references, list) or not references:
+            engine_logger.error("AGENT 1: Teacher references payload is invalid or empty.")
+            return False
+
+        if len(references) != expected_count:
+            engine_logger.error(
+                f"AGENT 1: Teacher reference count mismatch. "
+                f"Expected {expected_count}, got {len(references)}."
+            )
+            return False
+
+        seen_ranks = set()
+
+        for reference in references:
+            if not isinstance(reference, dict):
+                engine_logger.error("AGENT 1: Teacher reference entry is not a dict.")
+                return False
+
+            rank = reference.get("rank")
+            snippet = reference.get("snippet")
+            line_start = reference.get("line_start")
+            line_end = reference.get("line_end")
+
+            if not isinstance(rank, int) or rank <= 0:
+                engine_logger.error("AGENT 1: Teacher reference rank is invalid.")
+                return False
+
+            if rank in seen_ranks:
+                engine_logger.error("AGENT 1: Teacher reference ranks must be unique.")
+                return False
+
+            if not isinstance(snippet, str) or not snippet.strip():
+                engine_logger.error("AGENT 1: Teacher reference snippet is missing or blank.")
+                return False
+
+            if not isinstance(line_start, int) or line_start <= 0:
+                engine_logger.error("AGENT 1: Teacher reference line_start is invalid.")
+                return False
+
+            if not isinstance(line_end, int) or line_end <= 0:
+                engine_logger.error("AGENT 1: Teacher reference line_end is invalid.")
+                return False
+
+            if line_start > line_end:
+                engine_logger.error(
+                    f"AGENT 1: Teacher reference line range invalid: {line_start}-{line_end}"
+                )
+                return False
+
+            seen_ranks.add(rank)
+
+        return True
+
+    def _to_positive_int(self, value) -> int | None:
+        """
+        Safely converts a value to a positive integer.
+        """
+        try:
+            normalized_value = int(value)
+        except (TypeError, ValueError):
+            return None
+
+        return normalized_value if normalized_value > 0 else None
 
 
 # ── GLOBAL INSTANCE (lazy) ─────────────────────────────────────────

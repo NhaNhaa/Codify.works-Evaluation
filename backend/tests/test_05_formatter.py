@@ -1,57 +1,114 @@
-from backend.utils.formatter import build_output
+import pytest
 
-def run_test():
-    print("--- 🔍 STEP 5: Testing formatter.py ---")
-    
-    # Mock JSON Data: One High Weight FAIL, One Low Weight PASS
-    mock_data = {
-        "student_id": "STUDENT_001",
-        "assignment_id": "LAB_01",
-        "skills": [
-            {
-                "skill": "Array Boundary Check",
-                "rank": 1,
-                "weight": 5, # HIGH WEIGHT
-                "status": "FAIL",
-                "line_start": 10,
-                "line_end": 12,
-                "student_snippet": "for(int i=0; i<=5; i++)",
-                "feedback": "Index out of bounds at i=5",
-                "recommended_fix": "for(int i=0; i<5; i++)"
-            },
-            {
-                "skill": "Comments",
-                "rank": 2,
-                "weight": 1, # LOW WEIGHT
-                "status": "PASS",
-                "line_start": 1,
-                "line_end": 1,
-                "student_snippet": "// Main function",
-                "feedback": "Good documentation."
-            }
-        ]
+from backend.utils import formatter as formatter_module
+
+
+def test_format_skill_feedback_pass_includes_symbol_and_code_block():
+    skill = {
+        "skill": "Uses temporary variable correctly",
+        "status": "PASS",
+        "weight": 3,
+        "rank": 1,
+        "line_start": 4,
+        "line_end": 6,
+        "student_snippet": "temp = a;\na = b;\nb = temp;",
+        "feedback": "Correct swap logic.",
     }
 
-    output = build_output(mock_data)
-    markdown = output["markdown"]
+    markdown = formatter_module.format_skill_feedback(skill)
 
-    # 1. Check for High Weight Structure (WHY IT IS WRONG should be present)
-    if "**WHY IT IS WRONG:**" in markdown:
-        print("✅ PASS: High weight FAIL includes 'WHY' section.")
-    else:
-        print("❌ FAIL: High weight FAIL missing 'WHY' section.")
+    assert "### ✅ Skill 1 — Uses temporary variable correctly" in markdown
+    assert "Status: PASS" in markdown
+    assert "Lines 4–6" in markdown
+    assert "```c" in markdown
+    assert "Correct swap logic." in markdown
 
-    # 2. Check for Sorting (Rank 1 should appear before Rank 2 because weight 5 > 1)
-    if markdown.find("Array Boundary Check") < markdown.find("Comments"):
-        print("✅ PASS: Skills sorted by weight (descending).")
-    else:
-        print("❌ FAIL: Skills not sorted correctly.")
 
-    # 3. Check for Code Blocks
-    if "```c" in markdown:
-        print("✅ PASS: C-code blocks formatted correctly.")
-    else:
-        print("❌ FAIL: Markdown missing code blocks.")
+def test_format_skill_feedback_high_weight_fail_includes_why_section():
+    skill = {
+        "skill": "Preserves original value before overwrite",
+        "status": "FAIL",
+        "weight": 3,
+        "rank": 1,
+        "student_snippet": "a = b;",
+        "feedback": "You overwrite the original value too early.",
+        "recommended_fix": "temp = a;\na = b;\nb = temp;",
+    }
 
-if __name__ == "__main__":
-    run_test()
+    markdown = formatter_module.format_skill_feedback(skill)
+
+    assert "**WHAT YOU DID:**" in markdown
+    assert "**WHY IT IS WRONG:**" in markdown
+    assert "**HOW TO FIX IT:**" in markdown
+
+
+def test_format_skill_feedback_low_weight_fail_excludes_why_section():
+    skill = {
+        "skill": "Prints expected output",
+        "status": "FAIL",
+        "weight": 1,
+        "rank": 3,
+        "student_snippet": "printf(\"done\");",
+        "recommended_fix": "printf(\"%d\", value);",
+    }
+
+    markdown = formatter_module.format_skill_feedback(skill)
+
+    assert "**WHAT YOU DID:**" in markdown
+    assert "**HOW TO FIX IT:**" in markdown
+    assert "**WHY IT IS WRONG:**" not in markdown
+
+
+def test_format_report_sorts_by_weight_then_rank():
+    evaluation_result = {
+        "student_id": "student_01",
+        "assignment_id": "swap_task",
+        "skills": [
+            {"skill": "Third", "status": "PASS", "weight": 1, "rank": 3},
+            {"skill": "First", "status": "PASS", "weight": 3, "rank": 2},
+            {"skill": "Second", "status": "PASS", "weight": 3, "rank": 1},
+        ],
+    }
+
+    markdown = formatter_module.format_report(evaluation_result)
+
+    first_index = markdown.find("Second")
+    second_index = markdown.find("First")
+    third_index = markdown.find("Third")
+
+    assert first_index < second_index < third_index
+
+
+def test_format_report_handles_empty_skills_list():
+    evaluation_result = {
+        "student_id": "student_01",
+        "assignment_id": "swap_task",
+        "skills": [],
+    }
+
+    markdown = formatter_module.format_report(evaluation_result)
+
+    assert "# Evaluation Report — student_01" in markdown
+    assert "No skills to display." in markdown
+
+
+def test_build_output_returns_json_and_markdown():
+    evaluation_result = {
+        "student_id": "student_01",
+        "assignment_id": "swap_task",
+        "skills": [
+            {"skill": "Uses temporary variable", "status": "PASS", "weight": 3, "rank": 1}
+        ],
+    }
+
+    output = formatter_module.build_output(evaluation_result)
+
+    assert "json" in output
+    assert "markdown" in output
+    assert output["json"] == evaluation_result
+    assert "# Evaluation Report — student_01" in output["markdown"]
+
+
+def test_build_output_raises_for_invalid_input():
+    with pytest.raises(ValueError, match="evaluation_result must be a dictionary"):
+        formatter_module.build_output(None)

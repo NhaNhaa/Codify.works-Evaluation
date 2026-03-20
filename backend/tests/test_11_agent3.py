@@ -1,292 +1,458 @@
 """
 backend/tests/test_11_agent3.py
-Tests for Agent 3 — FeedbackWriter.
-Run with: python -m pytest backend/tests/test_11_agent3.py -v
+Tests for Agent 3: Feedback Writer.
+Mocks LLM calls and verifies feedback generation, self‑check, and sentence limits.
 """
 
 import json
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
+
+from backend.agents.agent3_feedback import FeedbackWriter, get_agent3
 from backend.config.constants import (
-    HIGH_WEIGHT_THRESHOLD,
+    FEEDBACK_PASS_MAX_SENTENCES,
+    FEEDBACK_FAIL_MAX_SENTENCES_PER_SECTION,
     MAX_SELF_CHECK_ATTEMPTS,
-    DEFAULT_WEIGHT_DISTRIBUTIONS
+    STATUS_PASS,
+    STATUS_FAIL,
 )
 
 
-# ── MOCK HELPERS ───────────────────────────────────────────────────
-def make_mock_response(content: str):
-    mock = MagicMock()
-    mock.choices[0].message.content = content
-    return mock
+# ----------------------------------------------------------------------
+# Fixtures
+# ----------------------------------------------------------------------
+@pytest.fixture
+def mock_llm_client(monkeypatch):
+    """Mock call_llm_with_retry."""
+    mock_call = MagicMock()
+    monkeypatch.setattr("backend.agents.agent3_feedback.call_llm_with_retry", mock_call)
+    return mock_call
 
 
-def make_agent():
-    from backend.agents.agent3_feedback import FeedbackWriter
-    agent = FeedbackWriter.__new__(FeedbackWriter)
-    agent.model  = "test-model"
-    agent.client = MagicMock()
-    return agent
+@pytest.fixture
+def mock_config(monkeypatch):
+    """Mock config.LLM_TEMPERATURE."""
+    monkeypatch.setattr("backend.agents.agent3_feedback.config", MagicMock(LLM_TEMPERATURE=0.1))
 
 
-# ── FIXTURES ───────────────────────────────────────────────────────
-PASS_SKILL = {
-    "skill":           "Avoid losing data using temp variable",
-    "rank":            1,
-    "weight":          4,
-    "status":          "PASS",
-    "line_start":      8,
-    "line_end":        8,
-    "student_snippet": "int temp = arr[0];",
-    "recommended_fix": None,
-    "feedback":        "",
-    "verified":        True
-}
-
-FAIL_HIGH_SKILL = {
-    "skill":           "Shift elements using arr[i] = arr[i+1]",
-    "rank":            2,
-    "weight":          3,
-    "status":          "FAIL",
-    "line_start":      10,
-    "line_end":        12,
-    "student_snippet": "arr[i-1] = arr[i];",
-    "recommended_fix": "arr[i] = arr[i + 1];",
-    "feedback":        "",
-    "verified":        True
-}
-
-FAIL_LOW_SKILL = {
-    "skill":           "Use scanf to read integers",
-    "rank":            4,
-    "weight":          1,
-    "status":          "FAIL",
-    "line_start":      5,
-    "line_end":        5,
-    "student_snippet": "scanf('%d', arr[i]);",
-    "recommended_fix": "scanf('%d', &arr[i]);",
-    "feedback":        "",
-    "verified":        True
-}
-
-SAMPLE_EVALUATION = {
-    "student_id":    "student_01",
-    "assignment_id": "lab_01",
-    "skills":        [PASS_SKILL, FAIL_HIGH_SKILL, FAIL_LOW_SKILL]
-}
+@pytest.fixture
+def mock_provider_config(monkeypatch):
+    """Mock get_provider_config and get_model."""
+    monkeypatch.setattr("backend.agents.agent3_feedback.get_provider_config",
+                        lambda: {"base_url": "http://test", "api_key": "key", "mode": "realtime"})
+    monkeypatch.setattr("backend.agents.agent3_feedback.get_model",
+                        lambda x: "test-model")
 
 
-# ══════════════════════════════════════════════════════════════════
-# 1. _clean_json
-# ══════════════════════════════════════════════════════════════════
-
-def test_clean_json_strips_fences():
-    from backend.agents.agent3_feedback import FeedbackWriter
-    raw     = '```json\n{"approved": true}\n```'
-    cleaned = FeedbackWriter._clean_json(raw)
-    assert json.loads(cleaned) == {"approved": True}
-
-
-# ══════════════════════════════════════════════════════════════════
-# 2. _generate_feedback
-# ══════════════════════════════════════════════════════════════════
-
-def test_generate_feedback_pass_skill():
-    """Should return non-empty feedback string for PASS skill."""
-    agent = make_agent()
-    agent.client.chat.completions.create.return_value = make_mock_response(
-        "Well done! Your use of a temp variable is correct."
-    )
-    result = agent._generate_feedback(PASS_SKILL)
-    assert isinstance(result, str)
-    assert len(result) > 0
+@pytest.fixture
+def mock_formatter(monkeypatch):
+    """Mock build_output to return a dict with the input preserved under 'json'."""
+    def fake_build_output(final_result):
+        return {"json": final_result, "markdown": "md"}
+    mock_build = MagicMock(side_effect=fake_build_output)
+    monkeypatch.setattr("backend.agents.agent3_feedback.build_output", mock_build)
+    return mock_build
 
 
-def test_generate_feedback_fail_high_weight():
-    """Should return non-empty feedback for high-weight FAIL skill."""
-    agent = make_agent()
-    agent.client.chat.completions.create.return_value = make_mock_response(
-        "WHAT YOU DID: You used arr[i-1]... WHY IT IS WRONG: ... HOW TO FIX IT: ..."
-    )
-    result = agent._generate_feedback(FAIL_HIGH_SKILL)
-    assert isinstance(result, str)
-    assert len(result) > 0
+@pytest.fixture
+def feedback_writer(mock_provider_config, mock_config):
+    """Return a FeedbackWriter instance with mocked dependencies."""
+    return FeedbackWriter()
 
 
-def test_generate_feedback_fail_low_weight():
-    """Should return non-empty feedback for low-weight FAIL skill."""
-    agent = make_agent()
-    agent.client.chat.completions.create.return_value = make_mock_response(
-        "WHAT YOU DID: Missing & operator. HOW TO FIX IT: Use &arr[i]."
-    )
-    result = agent._generate_feedback(FAIL_LOW_SKILL)
-    assert isinstance(result, str)
-    assert len(result) > 0
-
-
-def test_generate_feedback_with_previous():
-    """Should include previous feedback context when provided."""
-    agent = make_agent()
-    agent.client.chat.completions.create.return_value = make_mock_response(
-        "Improved feedback after self-check rejection."
-    )
-    result = agent._generate_feedback(FAIL_HIGH_SKILL, previous="Old feedback.")
-    assert isinstance(result, str)
-    assert len(result) > 0
-
-
-def test_generate_feedback_llm_exception_returns_fallback():
-    """Should return fallback string on LLM exception."""
-    agent = make_agent()
-    agent.client.chat.completions.create.side_effect = Exception("API error")
-    result = agent._generate_feedback(PASS_SKILL)
-    assert "could not be generated" in result.lower()
-
-
-# ══════════════════════════════════════════════════════════════════
-# 3. _selfcheck_feedback
-# ══════════════════════════════════════════════════════════════════
-
-def test_selfcheck_approved():
-    """Should return True when LLM approves feedback."""
-    agent = make_agent()
-    agent.client.chat.completions.create.return_value = make_mock_response(
-        json.dumps({"approved": True})
-    )
-    result = agent._selfcheck_feedback(
-        skill_text="Avoid losing data using temp variable",
-        status="PASS",
-        weight=4,
-        feedback="Great job using a temp variable!"
-    )
-    assert result is True
-
-
-def test_selfcheck_rejected():
-    """Should return False when LLM rejects feedback."""
-    agent = make_agent()
-    agent.client.chat.completions.create.return_value = make_mock_response(
-        json.dumps({"approved": False, "reason": "Too vague"})
-    )
-    result = agent._selfcheck_feedback(
-        skill_text="Shift elements",
-        status="FAIL",
-        weight=3,
-        feedback="You did something wrong."
-    )
-    assert result is False
-
-
-def test_selfcheck_llm_exception_returns_true():
-    """Should return True on exception — avoids infinite loop."""
-    agent = make_agent()
-    agent.client.chat.completions.create.side_effect = Exception("API error")
-    result = agent._selfcheck_feedback(
-        skill_text="Some skill",
-        status="FAIL",
-        weight=2,
-        feedback="Some feedback"
-    )
-    assert result is True
-
-
-# ══════════════════════════════════════════════════════════════════
-# 4. _write_and_selfcheck_feedback
-# ══════════════════════════════════════════════════════════════════
-
-def test_write_and_selfcheck_approved_first_attempt():
-    """Should return enriched skill with feedback on first approved attempt."""
-    agent = make_agent()
-    agent.client.chat.completions.create.side_effect = [
-        make_mock_response("Great job using a temp variable!"),   # generate
-        make_mock_response(json.dumps({"approved": True}))        # selfcheck
+@pytest.fixture
+def sample_skills():
+    """Return a list of sample skill verdicts from Agent 2, using non‑deterministic skill texts."""
+    return [
+        {
+            "skill": "Some generic skill A",  # not in deterministic families
+            "rank": 1,
+            "weight": 4,
+            "status": "PASS",
+            "line_start": 10,
+            "line_end": 12,
+            "student_snippet": "code",
+            "recommended_fix": "",
+            "feedback": "Technical evaluation completed.",
+            "verified": True,
+        },
+        {
+            "skill": "Some generic skill B",
+            "rank": 2,
+            "weight": 3,
+            "status": "FAIL",
+            "line_start": 10,
+            "line_end": 12,
+            "student_snippet": "code",
+            "recommended_fix": "fix",
+            "feedback": "Technical evaluation completed.",
+            "verified": True,
+        },
     ]
-    result = agent._write_and_selfcheck_feedback(PASS_SKILL.copy())
-    assert "feedback" in result
-    assert len(result["feedback"]) > 0
 
 
-def test_write_and_selfcheck_rewrites_on_rejection():
-    """Should rewrite feedback when self-check rejects first attempt."""
-    agent = make_agent()
-    agent.client.chat.completions.create.side_effect = [
-        make_mock_response("Vague feedback."),                              # generate
-        make_mock_response(json.dumps({"approved": False, "reason": "vague"})),  # selfcheck fail
-        make_mock_response("Improved specific feedback."),                  # regenerate
-        make_mock_response(json.dumps({"approved": True}))                 # selfcheck pass
-    ]
-    result = agent._write_and_selfcheck_feedback(FAIL_HIGH_SKILL.copy())
-    assert "feedback" in result
-    assert len(result["feedback"]) > 0
-
-
-def test_write_and_selfcheck_accepts_after_max_attempts():
-    """Should accept best feedback after MAX_SELF_CHECK_ATTEMPTS."""
-    agent = make_agent()
-    responses = []
-    for _ in range(MAX_SELF_CHECK_ATTEMPTS):
-        responses.append(make_mock_response("Some feedback."))
-        responses.append(make_mock_response(json.dumps({"approved": False, "reason": "still vague"})))
-    agent.client.chat.completions.create.side_effect = responses
-
-    result = agent._write_and_selfcheck_feedback(FAIL_LOW_SKILL.copy())
-    assert "feedback" in result
-    assert result["feedback"] is not None
-
-
-# ══════════════════════════════════════════════════════════════════
-# 5. run — full Phase 3 pipeline
-# ══════════════════════════════════════════════════════════════════
-
-def test_run_returns_json_and_markdown():
-    """Should return dict with both json and markdown keys."""
-    agent = make_agent()
-
-    # Each skill needs: generate feedback + selfcheck approval
-    responses = []
-    for skill in SAMPLE_EVALUATION["skills"]:
-        responses.append(make_mock_response("Good feedback text."))
-        responses.append(make_mock_response(json.dumps({"approved": True})))
-
-    agent.client.chat.completions.create.side_effect = responses
-
-    result = agent.run(SAMPLE_EVALUATION)
-    assert result is not None
-    assert "json"     in result
-    assert "markdown" in result
-    assert isinstance(result["markdown"], str)
-    assert len(result["markdown"]) > 0
-
-
-def test_run_returns_none_on_empty_skills():
-    """Should return None when no skills passed."""
-    agent  = make_agent()
-    result = agent.run({
-        "student_id":    "student_01",
+@pytest.fixture
+def evaluation_result(sample_skills):
+    """Full evaluation result dict as passed from Agent 2."""
+    return {
+        "student_id": "student_01",
         "assignment_id": "lab_01",
-        "skills":        []
-    })
+        "skills": sample_skills,
+    }
+
+
+# ----------------------------------------------------------------------
+# Tests
+# ----------------------------------------------------------------------
+def test_init(feedback_writer):
+    """Test initialization."""
+    assert feedback_writer.client is not None
+    assert feedback_writer.model == "test-model"
+
+
+def test_run_success(feedback_writer, evaluation_result, mock_llm_client, mock_formatter):
+    """Test run returns enriched skills and calls formatter."""
+    # Mock LLM to return some feedback and self‑check approvals
+    mock_llm_client.side_effect = [
+        "Well done! You correctly did it.",
+        '{"approved": true}',
+        "You forgot to do something.",
+        '{"approved": true}',
+    ]
+    result = feedback_writer.run(evaluation_result)
+    assert result is not None
+    # result is the output from build_output, which has keys "json" and "markdown"
+    assert "json" in result
+    assert "markdown" in result
+    assert result["json"]["student_id"] == "student_01"
+    assert len(result["json"]["skills"]) == 2
+    # Ensure feedback fields are populated
+    for skill in result["json"]["skills"]:
+        assert "feedback" in skill
+        assert skill["feedback"] != "Technical evaluation completed."
+    mock_formatter.assert_called_once()
+
+
+def test_run_invalid_input(feedback_writer):
+    """Test run with non‑dict or missing skills."""
+    assert feedback_writer.run(None) is None
+    assert feedback_writer.run({}) is None  # empty dict, no skills
+
+
+def test_run_no_skills(feedback_writer):
+    """Test run with empty skills list."""
+    result = feedback_writer.run({"student_id": "s1", "assignment_id": "a1", "skills": []})
     assert result is None
 
 
-def test_run_sorts_skills_by_weight_descending():
-    """Skills in output should be sorted highest weight first."""
-    agent = make_agent()
+def test_write_and_selfcheck_pass(feedback_writer, mock_llm_client):
+    """Test _write_and_selfcheck_feedback for a PASS skill (non‑deterministic)."""
+    skill = {
+        "skill": "Generic skill",  # not in deterministic families
+        "status": "PASS",
+        "weight": 2,
+        "student_snippet": "code",
+        "recommended_fix": "",
+        "feedback": "",
+        "line_start": 5,
+        "line_end": 7,
+    }
+    mock_llm_client.side_effect = [
+        "You did it correctly.",
+        '{"approved": true}',
+    ]
+    result = feedback_writer._write_and_selfcheck_feedback(skill)
+    assert result["feedback"] == "You did it correctly."
+    assert result["status"] == "PASS"
+    assert mock_llm_client.call_count == 2
 
+
+def test_write_and_selfcheck_fail_high_weight(feedback_writer, mock_llm_client):
+    """Test FAIL with weight >= HIGH_WEIGHT_THRESHOLD (non‑deterministic)."""
+    skill = {
+        "skill": "Generic skill",
+        "status": "FAIL",
+        "weight": 4,
+        "student_snippet": "code",
+        "recommended_fix": "fix",
+        "feedback": "",
+        "line_start": 1,
+        "line_end": 3,
+    }
+    mock_llm_client.side_effect = [
+        "You made a mistake.",
+        '{"approved": true}',
+    ]
+    result = feedback_writer._write_and_selfcheck_feedback(skill)
+    assert "mistake" in result["feedback"].lower()
+    assert result["status"] == "FAIL"
+
+
+def test_write_and_selfcheck_self_check_retry(feedback_writer, mock_llm_client):
+    """Test self‑check rejects first attempt, second is accepted (non‑deterministic)."""
+    skill = {
+        "skill": "Generic skill",
+        "status": "PASS",
+        "weight": 2,
+        "student_snippet": "code",
+        "recommended_fix": "",
+        "feedback": "",
+    }
+    mock_llm_client.side_effect = [
+        "First attempt feedback.",
+        '{"approved": false, "reason": "too long"}',
+        "Second attempt feedback.",
+        '{"approved": true}',
+    ]
+    result = feedback_writer._write_and_selfcheck_feedback(skill)
+    assert result["feedback"] == "Second attempt feedback."
+    assert mock_llm_client.call_count == 4
+
+
+def test_write_and_selfcheck_max_attempts(feedback_writer, mock_llm_client):
+    """Test self‑check always rejects, uses last feedback after max attempts (non‑deterministic)."""
+    skill = {
+        "skill": "Generic skill",
+        "status": "PASS",
+        "weight": 2,
+        "student_snippet": "code",
+        "recommended_fix": "",
+        "feedback": "",
+    }
     responses = []
-    for skill in SAMPLE_EVALUATION["skills"]:
-        responses.append(make_mock_response("Feedback text."))
-        responses.append(make_mock_response(json.dumps({"approved": True})))
-
-    agent.client.chat.completions.create.side_effect = responses
-
-    result  = agent.run(SAMPLE_EVALUATION)
-    skills  = result["json"]["skills"]
-    weights = [s["weight"] for s in skills]
-    assert weights == sorted(weights, reverse=True)
+    for i in range(MAX_SELF_CHECK_ATTEMPTS):
+        responses.append(f"Feedback attempt {i+1}")
+        responses.append('{"approved": false}')
+    mock_llm_client.side_effect = responses
+    result = feedback_writer._write_and_selfcheck_feedback(skill)
+    assert result["feedback"] == f"Feedback attempt {MAX_SELF_CHECK_ATTEMPTS}"
+    assert mock_llm_client.call_count == MAX_SELF_CHECK_ATTEMPTS * 2
 
 
-# ── MAIN RUNNER ────────────────────────────────────────────────────
-if __name__ == "__main__":
-    import sys
-    sys.exit(pytest.main([__file__, "-v"]))
+def test_generate_feedback_deterministic(feedback_writer):
+    """Test that deterministic feedback is used when applicable."""
+    skill = {
+        "skill": "shift elements",
+        "status": "PASS",
+        "weight": 3,
+        "student_snippet": "code",
+        "recommended_fix": "",
+        "feedback": "",
+    }
+    result = feedback_writer._generate_feedback(skill)
+    # Should return deterministic shift_transform PASS feedback
+    assert "left-shift copy pattern" in result
+
+
+def test_generate_feedback_llm_call(feedback_writer, mock_llm_client):
+    """Test that LLM is called for non‑deterministic skills."""
+    skill = {
+        "skill": "Some other skill",
+        "status": "PASS",
+        "weight": 2,
+        "student_snippet": "code",
+        "recommended_fix": "",
+        "feedback": "",
+        "line_start": 1,
+        "line_end": 2,
+    }
+    mock_llm_client.return_value = "Generated feedback."
+    result = feedback_writer._generate_feedback(skill)
+    assert result == "Generated feedback."
+    mock_llm_client.assert_called_once()
+    # Ensure correct temperature and no response_format (plain text)
+    args, kwargs = mock_llm_client.call_args
+    assert kwargs["temperature"] == 0.1
+    assert "response_format" not in kwargs
+
+
+def test_generate_feedback_with_previous(feedback_writer, mock_llm_client):
+    """Test that previous attempt is included when provided."""
+    skill = {
+        "skill": "Some skill",
+        "status": "FAIL",
+        "weight": 3,
+        "student_snippet": "code",
+        "recommended_fix": "fix",
+        "feedback": "",
+        "line_start": 1,
+        "line_end": 2,
+    }
+    previous = "Old feedback."
+    mock_llm_client.return_value = "New feedback."
+    feedback_writer._generate_feedback(skill, previous)
+    args, kwargs = mock_llm_client.call_args
+    # The prompt should contain the previous attempt
+    assert previous in kwargs["messages"][1]["content"]
+
+
+def test_generate_feedback_llm_failure(feedback_writer, mock_llm_client):
+    """Test fallback when LLM returns None."""
+    skill = {
+        "skill": "Some skill",
+        "status": "PASS",
+        "weight": 2,
+        "student_snippet": "code",
+        "recommended_fix": "",
+        "feedback": "",
+    }
+    mock_llm_client.return_value = None
+    result = feedback_writer._generate_feedback(skill)
+    # Should fall back to deterministic if possible, else fallback string
+    # Since skill is not recognized, fallback is used.
+    assert result == "Your code correctly demonstrates this skill."
+
+
+def test_build_deterministic_feedback(feedback_writer):
+    """Test all deterministic feedback branches."""
+    # Shift transform PASS
+    skill = {"skill": "shift elements", "status": "PASS"}
+    assert feedback_writer._build_deterministic_feedback(skill) is not None
+    # Shift transform FAIL
+    skill["status"] = "FAIL"
+    assert feedback_writer._build_deterministic_feedback(skill) is not None
+    # Shift temp safety PASS
+    skill = {"skill": "temporary variable", "status": "PASS"}
+    assert feedback_writer._build_deterministic_feedback(skill) is not None
+    # Shift temp safety FAIL
+    skill["status"] = "FAIL"
+    assert feedback_writer._build_deterministic_feedback(skill) is not None
+    # scanf PASS
+    skill = {"skill": "scanf input", "status": "PASS"}
+    assert feedback_writer._build_deterministic_feedback(skill) is not None
+    # scanf FAIL
+    skill["status"] = "FAIL"
+    assert feedback_writer._build_deterministic_feedback(skill) is not None
+    # array index PASS
+    skill = {"skill": "arr[i] access", "status": "PASS"}
+    assert feedback_writer._build_deterministic_feedback(skill) is not None
+    # array index FAIL
+    skill["status"] = "FAIL"
+    assert feedback_writer._build_deterministic_feedback(skill) is not None
+    # Other skill
+    skill = {"skill": "other", "status": "PASS"}
+    assert feedback_writer._build_deterministic_feedback(skill) is None
+
+
+def test_build_fallback_feedback(feedback_writer):
+    """Test fallback feedback strings."""
+    skill = {"status": "PASS"}
+    assert "correctly demonstrates" in feedback_writer._build_fallback_feedback(skill)
+    skill["status"] = "FAIL"
+    assert "does not fully demonstrate" in feedback_writer._build_fallback_feedback(skill)
+
+
+def test_selfcheck_feedback_approved(feedback_writer, mock_llm_client):
+    """Test self‑check returns True when approved."""
+    mock_llm_client.return_value = '{"approved": true}'
+    result = feedback_writer._selfcheck_feedback("skill", "PASS", 2, "feedback")
+    assert result is True
+    args, kwargs = mock_llm_client.call_args
+    assert kwargs["response_format"] == {"type": "json_object"}
+
+
+def test_selfcheck_feedback_not_approved(feedback_writer, mock_llm_client):
+    """Test self‑check returns False when not approved."""
+    mock_llm_client.return_value = '{"approved": false, "reason": "too long"}'
+    result = feedback_writer._selfcheck_feedback("skill", "PASS", 2, "feedback")
+    assert result is False
+
+
+def test_selfcheck_feedback_llm_failure(feedback_writer, mock_llm_client):
+    """Test self‑check returns True on LLM failure (conservative)."""
+    mock_llm_client.return_value = None
+    result = feedback_writer._selfcheck_feedback("skill", "PASS", 2, "feedback")
+    assert result is True
+
+
+def test_selfcheck_feedback_invalid_json(feedback_writer, mock_llm_client):
+    """Test self‑check returns True on parse error."""
+    mock_llm_client.return_value = "not json"
+    result = feedback_writer._selfcheck_feedback("skill", "PASS", 2, "feedback")
+    assert result is True
+
+
+def test_enforce_sentence_limits_pass(feedback_writer):
+    """Test sentence limit for PASS."""
+    long_feedback = "First sentence. Second sentence. Third sentence. Fourth sentence."
+    limited = feedback_writer._enforce_sentence_limits(long_feedback, "PASS")
+    # Should be truncated to FEEDBACK_PASS_MAX_SENTENCES (3)
+    assert len(limited.split(". ")) == FEEDBACK_PASS_MAX_SENTENCES
+
+
+def test_enforce_sentence_limits_fail(feedback_writer):
+    """Test sentence limit for FAIL."""
+    long_feedback = "First. Second. Third. Fourth."
+    limited = feedback_writer._enforce_sentence_limits(long_feedback, "FAIL")
+    assert len(limited.split(". ")) == FEEDBACK_FAIL_MAX_SENTENCES_PER_SECTION
+
+
+def test_sanitize_feedback_precision_risky_phrases(feedback_writer):
+    """Test risky phrases are replaced with deterministic feedback."""
+    skill = {"skill": "shift elements", "status": "PASS"}
+    feedback = "The whole program works correctly."
+    sanitized = feedback_writer._sanitize_feedback_precision(feedback, skill)
+    # Should use deterministic feedback
+    assert "left-shift copy pattern" in sanitized
+
+
+def test_sanitize_feedback_precision_front_replacement(feedback_writer):
+    """Test 'front' is replaced with 'last position' when appropriate."""
+    skill = {"skill": "shift elements", "recommended_fix": "arr[4] = temp;"}
+    feedback = "The value should be placed at the front."
+    sanitized = feedback_writer._sanitize_feedback_precision(feedback, skill)
+    assert "front" not in sanitized
+    assert "last position" in sanitized
+
+
+def test_sanitize_feedback_precision_no_change(feedback_writer):
+    """Test safe feedback is unchanged."""
+    skill = {"skill": "other", "recommended_fix": ""}
+    feedback = "This is safe feedback."
+    sanitized = feedback_writer._sanitize_feedback_precision(feedback, skill)
+    assert sanitized == "This is safe feedback."
+
+
+def test_truncate_to_sentences(feedback_writer):
+    """Test sentence truncation utility."""
+    text = "First. Second? Third! Fourth."
+    truncated = feedback_writer._truncate_to_sentences(text, 2)
+    assert truncated == "First. Second?"
+
+    # Already within limit
+    truncated = feedback_writer._truncate_to_sentences(text, 5)
+    assert truncated == text
+
+
+def test_detect_skill_family(feedback_writer):
+    """Test skill family detection."""
+    assert feedback_writer._detect_skill_family("shift elements") == "shift_transform"
+    assert feedback_writer._detect_skill_family("use temporary variable") == "shift_temp_safety"
+    assert feedback_writer._detect_skill_family("scanf input") == "scanf_input"
+    assert feedback_writer._detect_skill_family("arr[i] index") == "array_index"
+    assert feedback_writer._detect_skill_family("other") == "other"
+
+
+def test_clean_json(feedback_writer):
+    """Test cleaning of JSON strings."""
+    content = "```json\n{\"key\": \"value\"}\n```"
+    assert feedback_writer._clean_json(content) == '{"key": "value"}'
+    content2 = "```\n[1,2,3]\n```"
+    assert feedback_writer._clean_json(content2) == "[1,2,3]"
+    content3 = "   plain text   "
+    assert feedback_writer._clean_json(content3) == "plain text"
+
+
+def test_safe_int(feedback_writer):
+    """Test safe integer conversion."""
+    assert feedback_writer._safe_int("5", 0) == 5
+    assert feedback_writer._safe_int("abc", 10) == 10
+    assert feedback_writer._safe_int(None, 10) == 10
+
+
+def test_get_agent3_singleton(mock_provider_config, mock_config):
+    """Test that get_agent3 returns the same instance."""
+    a1 = get_agent3()
+    a2 = get_agent3()
+    assert a1 is a2

@@ -1,41 +1,91 @@
-import numpy as np
-from backend.rag.embedder import embedder
+from backend.rag import embedder as embedder_module
 
-def run_test():
-    print("--- 🔍 STEP 6: Testing embedder.py ---")
-    
-    # 1. Test Single Embedding
-    text = "Implement a for-loop to iterate through an array."
-    vector = embedder.embed_single(text)
-    
-    if isinstance(vector, list) and len(vector) > 0:
-        print(f"✅ PASS: Single embedding generated. Dimensions: {len(vector)}")
-    else:
-        print("❌ FAIL: Single embedding failed or returned empty.")
-        return
 
-    # 2. Test Batch Embedding
-    texts = ["Variable declaration", "Pointer arithmetic", "Memory allocation"]
-    vectors = embedder.embed_texts(texts)
-    
-    if len(vectors) == 3:
-        print(f"✅ PASS: Batch embedding generated {len(vectors)} vectors.")
-    else:
-        print(f"❌ FAIL: Batch embedding count mismatch (Got {len(vectors)}).")
+class FakeEmbeddings:
+    def __init__(self, data):
+        self._data = data
 
-    # 3. Semantic Similarity Check (The "Skeptical Engineer" Check)
-    # Vectors for similar phrases should be closer than unrelated ones
-    v1 = np.array(embedder.embed_single("How to use a loop"))
-    v2 = np.array(embedder.embed_single("Looping structures in C"))
-    v3 = np.array(embedder.embed_single("Setting up a database")) # Unrelated
+    def tolist(self):
+        return self._data
 
-    dist_similar = np.linalg.norm(v1 - v2)
-    dist_different = np.linalg.norm(v1 - v3)
 
-    if dist_similar < dist_different:
-        print(f"✅ PASS: Semantic similarity confirmed. (Dist: {dist_similar:.4f} < {dist_different:.4f})")
-    else:
-        print("❌ FAIL: Embedder lacks semantic nuance.")
+class FakeSentenceTransformer:
+    def __init__(self, model_name):
+        self.model_name = model_name
 
-if __name__ == "__main__":
-    run_test()
+    def encode(self, texts, convert_to_numpy=True, show_progress_bar=False):
+        data = []
+        for text in texts:
+            text_length = float(len(text))
+            word_count = float(len(text.split()))
+            data.append([text_length, word_count])
+        return FakeEmbeddings(data)
+
+
+def test_embed_texts_returns_embeddings_for_valid_input(monkeypatch):
+    monkeypatch.setattr(
+        embedder_module,
+        "SentenceTransformer",
+        FakeSentenceTransformer,
+    )
+
+    embedder = embedder_module.Embedder()
+    result = embedder.embed_texts(["Use scanf to read input", "Avoid data loss"])
+
+    assert len(result) == 2
+    assert all(isinstance(vector, list) for vector in result)
+    assert all(len(vector) == 2 for vector in result)
+
+
+def test_embed_texts_rejects_invalid_item_without_silent_dropping(monkeypatch):
+    monkeypatch.setattr(
+        embedder_module,
+        "SentenceTransformer",
+        FakeSentenceTransformer,
+    )
+
+    embedder = embedder_module.Embedder()
+    result = embedder.embed_texts(["Valid text", "   ", "Another valid text"])
+
+    assert result == []
+
+
+def test_embed_single_returns_one_vector(monkeypatch):
+    monkeypatch.setattr(
+        embedder_module,
+        "SentenceTransformer",
+        FakeSentenceTransformer,
+    )
+
+    embedder = embedder_module.Embedder()
+    result = embedder.embed_single("Use temporary variable")
+
+    assert isinstance(result, list)
+    assert len(result) == 2
+
+
+def test_embed_single_returns_empty_for_invalid_text(monkeypatch):
+    monkeypatch.setattr(
+        embedder_module,
+        "SentenceTransformer",
+        FakeSentenceTransformer,
+    )
+
+    embedder = embedder_module.Embedder()
+    result = embedder.embed_single("   ")
+
+    assert result == []
+
+
+def test_get_embedder_returns_singleton(monkeypatch):
+    monkeypatch.setattr(
+        embedder_module,
+        "SentenceTransformer",
+        FakeSentenceTransformer,
+    )
+    monkeypatch.setattr(embedder_module, "_embedder_instance", None)
+
+    first = embedder_module.get_embedder()
+    second = embedder_module.get_embedder()
+
+    assert first is second

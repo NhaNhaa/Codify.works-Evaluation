@@ -211,7 +211,7 @@ curl -X DELETE http://localhost:8000/assignment/lab_01
 ### Build the container
 
 ```bash
-docker build -f docker/Dockerfile -t codify-evaluation .
+docker build -f docker/Dockerfile -t codify-evaluation-c .
 ```
 
 ### Run the container
@@ -325,41 +325,75 @@ python -m backend.tests.test_llm_quota
 ## Project Structure
 
 ```
-Codify.works/
-├── backend/
-│   ├── agents/
-│   │   ├── agent1_extractor.py      ← Skill Extractor (Phase 1)
-│   │   ├── agent1_validators.py     ← Python validation (no LLM)
-│   │   ├── agent2_evaluator.py      ← Evaluator (Phase 2)
-│   │   └── agent3_feedback.py       ← Feedback Writer (Phase 3)
-│   ├── rag/
-│   │   ├── rag_pipeline.py          ← RAG orchestrator
-│   │   ├── chroma_client.py         ← ChromaDB operations
-│   │   └── embedder.py              ← Sentence embeddings
-│   ├── config/
-│   │   ├── config.py                ← Provider config + API keys
-│   │   └── constants.py             ← All fixed values
-│   ├── utils/
-│   │   ├── formatter.py             ← JSON → Markdown
-│   │   ├── llm_client.py            ← LLM retry wrapper
-│   │   ├── logger.py                ← Centralized logging
-│   │   ├── security.py              ← File validation
-│   │   └── skill_parser.py          ← Python skill extractor
-│   ├── api.py                       ← FastAPI endpoints
-│   └── main.py                      ← Entry point
-├── data/
-│   ├── inputs/                      ← Assignment + student files
-│   └── outputs/                     ← Feedback reports
-├── docker/
-│   └── Dockerfile                   ← Container build
-├── Upload/                          ← Test files
-│   ├── instructions.md
-│   ├── starter_code.c
-│   ├── teacher_correction_code.c
-│   └── student_01.c
-├── .env.example
-├── requirements.txt
-└── README.md
+Codify.works
+├─ .dockerignore
+├─ backend
+│  ├─ agents
+│  │  ├─ agent1_extractor.py
+│  │  ├─ agent1_validators
+│  │  │  ├─ dedup_ranking.py
+│  │  │  ├─ validation.py
+│  │  │  └─ __init__.py
+│  │  ├─ agent2_evaluator.py
+│  │  ├─ agent3_feedback.py
+│  │  └─ __init__.py
+│  ├─ api.py
+│  ├─ config
+│  │  ├─ config.py
+│  │  └─ constants.py
+│  ├─ main.py
+│  ├─ rag
+│  │  ├─ chroma_client.py
+│  │  ├─ embedder.py
+│  │  ├─ rag_pipeline.py
+│  │  └─ __init__.py
+│  ├─ tests
+│  │  ├─ test_01_constants.py
+│  │  ├─ test_02_config.py
+│  │  ├─ test_03_logger.py
+│  │  ├─ test_04_security.py
+│  │  ├─ test_05_formatter.py
+│  │  ├─ test_06_embedder.py
+│  │  ├─ test_07_chroma.py
+│  │  ├─ test_08_rag_pipeline.py
+│  │  ├─ test_09_agent1_extractor.py
+│  │  ├─ test_10_agent2.py
+│  │  ├─ test_11_agent3.py
+│  │  ├─ test_12_api.py
+│  │  ├─ test_13_skill_parser.py
+│  │  ├─ test_14_agent1_validator.py
+│  │  ├─ test_15_llm_client.py
+│  │  ├─ test_16_main.py
+│  │  ├─ test_live_llm_quota.py
+│  │  ├─ test_llm_full_run_usage.py
+│  │  └─ test_llm_quota.py
+│  ├─ utils
+│  │  ├─ formatter.py
+│  │  ├─ llm_client.py
+│  │  ├─ logger.py
+│  │  ├─ security.py
+│  │  └─ skill_parser.py
+│  └─ __init__.py
+├─ data
+│  └─ inputs
+│     └─ lab_01
+│        ├─ instructions.md
+│        ├─ starter_code.c
+│        ├─ students
+│        │  └─ student_01.c
+│        └─ teacher_correction_code.c
+├─ docker
+│  └─ Dockerfile
+├─ frontend
+├─ README.md
+├─ requirements.txt
+├─ setup.sh
+└─ Upload
+   ├─ instructions.md
+   ├─ starter_code.c
+   ├─ student_01.c
+   └─ teacher_correction_code.c
+
 ```
 
 ---

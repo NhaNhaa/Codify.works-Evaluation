@@ -10,8 +10,8 @@ from chromadb.config import Settings
 
 from backend.config.config import (
     CHROMA_PERSIST_DIRECTORY,
+    CHROMA_REFERENCES_COLLECTION,
     CHROMA_SKILLS_COLLECTION,
-    CHROMA_REFERENCES_COLLECTION
 )
 from backend.config.constants import TOTAL_WEIGHT_TARGET
 from backend.utils.logger import engine_logger
@@ -44,23 +44,23 @@ class ChromaClient:
         try:
             self.client = chromadb.PersistentClient(
                 path=CHROMA_PERSIST_DIRECTORY,
-                settings=Settings(anonymized_telemetry=False)
+                settings=Settings(anonymized_telemetry=False),
             )
 
             self.skills_collection = self.client.get_or_create_collection(
                 name=CHROMA_SKILLS_COLLECTION,
-                metadata={"hnsw:space": "cosine"}
+                metadata={"hnsw:space": "cosine"},
             )
 
             self.references_collection = self.client.get_or_create_collection(
                 name=CHROMA_REFERENCES_COLLECTION,
-                metadata={"hnsw:space": "cosine"}
+                metadata={"hnsw:space": "cosine"},
             )
 
             engine_logger.info("CHROMA: ChromaDB initialized successfully.")
 
-        except Exception as e:
-            engine_logger.error(f"CHROMA: Initialization failed: {e}")
+        except Exception as exc:
+            engine_logger.error(f"CHROMA: Initialization failed: {exc}")
             raise
 
     def _is_valid_assignment_id(self, assignment_id: str) -> bool:
@@ -72,11 +72,53 @@ class ChromaClient:
             return False
         return True
 
+    def _is_valid_positive_int(self, value) -> bool:
+        """
+        Returns True only for positive integers.
+        """
+        return isinstance(value, int) and value > 0
+
+    def _is_valid_embedding_vector(self, embedding) -> bool:
+        """
+        Validates one embedding vector.
+        """
+        if not isinstance(embedding, list) or not embedding:
+            return False
+
+        for value in embedding:
+            if not isinstance(value, (int, float)):
+                return False
+
+        return True
+
+    def _validate_embeddings(
+        self,
+        embeddings: list[list[float]],
+        assignment_id: str,
+        payload_label: str,
+    ) -> bool:
+        """
+        Validates embeddings before storing.
+        """
+        if not isinstance(embeddings, list) or not embeddings:
+            engine_logger.error(f"CHROMA: {payload_label} embeddings must be a non-empty list.")
+            return False
+
+        for index, embedding in enumerate(embeddings):
+            if not self._is_valid_embedding_vector(embedding):
+                engine_logger.error(
+                    f"CHROMA: Invalid embedding vector at index {index} "
+                    f"for '{assignment_id}'."
+                )
+                return False
+
+        return True
+
     def _validate_skill_payload(
         self,
         skills: list[dict],
         embeddings: list[list[float]],
-        assignment_id: str
+        assignment_id: str,
     ) -> bool:
         """
         Validates micro skill payload before storing.
@@ -88,8 +130,7 @@ class ChromaClient:
             engine_logger.error("CHROMA: skills must be a non-empty list.")
             return False
 
-        if not isinstance(embeddings, list) or not embeddings:
-            engine_logger.error("CHROMA: embeddings must be a non-empty list.")
+        if not self._validate_embeddings(embeddings, assignment_id, "skill"):
             return False
 
         if len(skills) != len(embeddings):
@@ -99,26 +140,50 @@ class ChromaClient:
             )
             return False
 
+        seen_ranks = set()
+        total_weight = 0
+
         for index, skill in enumerate(skills):
             if not isinstance(skill, dict):
-                engine_logger.error(
-                    f"CHROMA: Skill at index {index} is not a dict."
-                )
+                engine_logger.error(f"CHROMA: Skill at index {index} is not a dict.")
                 return False
 
             skill_text = skill.get("text", "")
+            rank = skill.get("rank")
+            weight = skill.get("weight")
+
             if not isinstance(skill_text, str) or not skill_text.strip():
                 engine_logger.error(
                     f"CHROMA: Skill text missing or blank at index {index}."
                 )
                 return False
 
-        total_weight = sum(skill.get("weight", 0) for skill in skills)
+            if not self._is_valid_positive_int(rank):
+                engine_logger.error(
+                    f"CHROMA: Skill rank invalid at index {index}: {rank}"
+                )
+                return False
+
+            if rank in seen_ranks:
+                engine_logger.error(
+                    f"CHROMA: Duplicate skill rank detected for '{assignment_id}': {rank}"
+                )
+                return False
+
+            if not self._is_valid_positive_int(weight):
+                engine_logger.error(
+                    f"CHROMA: Skill weight invalid at index {index}: {weight}"
+                )
+                return False
+
+            seen_ranks.add(rank)
+            total_weight += weight
+
         if total_weight != TOTAL_WEIGHT_TARGET:
             engine_logger.error(
                 f"CHROMA: Weight sum mismatch for '{assignment_id}'. "
                 f"Expected {TOTAL_WEIGHT_TARGET}, got {total_weight}. "
-                f"Aborting store."
+                "Aborting store."
             )
             return False
 
@@ -128,7 +193,7 @@ class ChromaClient:
         self,
         references: list[dict],
         embeddings: list[list[float]],
-        assignment_id: str
+        assignment_id: str,
     ) -> bool:
         """
         Validates teacher reference payload before storing.
@@ -140,8 +205,7 @@ class ChromaClient:
             engine_logger.error("CHROMA: references must be a non-empty list.")
             return False
 
-        if not isinstance(embeddings, list) or not embeddings:
-            engine_logger.error("CHROMA: embeddings must be a non-empty list.")
+        if not self._validate_embeddings(embeddings, assignment_id, "reference"):
             return False
 
         if len(references) != len(embeddings):
@@ -151,19 +215,51 @@ class ChromaClient:
             )
             return False
 
+        seen_ranks = set()
+
         for index, reference in enumerate(references):
             if not isinstance(reference, dict):
-                engine_logger.error(
-                    f"CHROMA: Reference at index {index} is not a dict."
-                )
+                engine_logger.error(f"CHROMA: Reference at index {index} is not a dict.")
                 return False
 
             snippet = reference.get("snippet", "")
+            rank = reference.get("rank")
+            line_start = reference.get("line_start")
+            line_end = reference.get("line_end")
+
             if not isinstance(snippet, str) or not snippet.strip():
                 engine_logger.error(
                     f"CHROMA: Reference snippet missing or blank at index {index}."
                 )
                 return False
+
+            if not self._is_valid_positive_int(rank):
+                engine_logger.error(
+                    f"CHROMA: Reference rank invalid at index {index}: {rank}"
+                )
+                return False
+
+            if rank in seen_ranks:
+                engine_logger.error(
+                    f"CHROMA: Duplicate reference rank detected for '{assignment_id}': {rank}"
+                )
+                return False
+
+            if not self._is_valid_positive_int(line_start) or not self._is_valid_positive_int(line_end):
+                engine_logger.error(
+                    f"CHROMA: Invalid reference line range at index {index}: "
+                    f"{line_start}-{line_end}"
+                )
+                return False
+
+            if line_start > line_end:
+                engine_logger.error(
+                    f"CHROMA: Reversed reference line range at index {index}: "
+                    f"{line_start}-{line_end}"
+                )
+                return False
+
+            seen_ranks.add(rank)
 
         return True
 
@@ -178,10 +274,7 @@ class ChromaClient:
         try:
             self._ensure_initialized()
 
-            results = self.skills_collection.get(
-                where={"assignment_id": assignment_id}
-            )
-
+            results = self.skills_collection.get(where={"assignment_id": assignment_id})
             exists = len(results.get("documents", [])) > 0
 
             engine_logger.info(
@@ -189,8 +282,8 @@ class ChromaClient:
             )
             return exists
 
-        except Exception as e:
-            engine_logger.error(f"CHROMA: assignment_exists check failed: {e}")
+        except Exception as exc:
+            engine_logger.error(f"CHROMA: assignment_exists check failed: {exc}")
             return False
 
     def store_micro_skills(
@@ -198,12 +291,14 @@ class ChromaClient:
         skills: list[dict],
         assignment_id: str,
         embeddings: list[list[float]],
-        force_regenerate: bool = False
+        force_regenerate: bool = False,
     ) -> bool:
         """
         Stores ranked and weighted micro skills into ChromaDB.
         Validates weight sum = 10 before storing.
         Never overwrites without explicit force_regenerate flag.
+        Regenerating micro skills clears both skills and teacher references
+        because references depend on the final skill set.
         """
         if not self._validate_skill_payload(skills, embeddings, assignment_id):
             return False
@@ -216,7 +311,7 @@ class ChromaClient:
             if exists and not force_regenerate:
                 engine_logger.warning(
                     f"CHROMA: Skills already exist for '{assignment_id}'. "
-                    f"Use force_regenerate=True to overwrite."
+                    "Use force_regenerate=True to overwrite."
                 )
                 return False
 
@@ -224,7 +319,7 @@ class ChromaClient:
                 if not self.clear_assignment(assignment_id):
                     engine_logger.error(
                         f"CHROMA: Failed to clear existing data for '{assignment_id}' "
-                        f"before regenerating skills."
+                        "before regenerating skills."
                     )
                     return False
 
@@ -234,8 +329,8 @@ class ChromaClient:
                 {
                     "assignment_id": assignment_id,
                     "skill_index": index,
-                    "rank": skill.get("rank", index + 1),
-                    "weight": skill.get("weight", 1),
+                    "rank": skill["rank"],
+                    "weight": skill["weight"],
                 }
                 for index, skill in enumerate(skills)
             ]
@@ -244,7 +339,7 @@ class ChromaClient:
                 ids=ids,
                 documents=documents,
                 embeddings=embeddings,
-                metadatas=metadatas
+                metadatas=metadatas,
             )
 
             engine_logger.info(
@@ -253,8 +348,8 @@ class ChromaClient:
             )
             return True
 
-        except Exception as e:
-            engine_logger.error(f"CHROMA: store_micro_skills failed: {e}")
+        except Exception as exc:
+            engine_logger.error(f"CHROMA: store_micro_skills failed: {exc}")
             return False
 
     def retrieve_micro_skills(self, assignment_id: str) -> list[dict]:
@@ -268,9 +363,7 @@ class ChromaClient:
         try:
             self._ensure_initialized()
 
-            results = self.skills_collection.get(
-                where={"assignment_id": assignment_id}
-            )
+            results = self.skills_collection.get(where={"assignment_id": assignment_id})
 
             documents = results.get("documents", [])
             metadatas = results.get("metadatas", [])
@@ -281,18 +374,24 @@ class ChromaClient:
                 )
                 return []
 
-            paired = sorted(
-                zip(metadatas, documents),
-                key=lambda item: item[0].get("rank", 0)
-            )
+            paired_records = []
+            for metadata, document in zip(metadatas, documents):
+                if not isinstance(metadata, dict):
+                    continue
+                if not isinstance(document, str) or not document.strip():
+                    continue
+
+                paired_records.append((metadata, document.strip()))
+
+            paired_records.sort(key=lambda item: item[0].get("rank", 0))
 
             skills = [
                 {
                     "text": document,
                     "rank": metadata.get("rank", 0),
-                    "weight": metadata.get("weight", 1)
+                    "weight": metadata.get("weight", 1),
                 }
-                for metadata, document in paired
+                for metadata, document in paired_records
             ]
 
             engine_logger.info(
@@ -301,8 +400,8 @@ class ChromaClient:
             )
             return skills
 
-        except Exception as e:
-            engine_logger.error(f"CHROMA: retrieve_micro_skills failed: {e}")
+        except Exception as exc:
+            engine_logger.error(f"CHROMA: retrieve_micro_skills failed: {exc}")
             return []
 
     def store_teacher_references(
@@ -310,12 +409,13 @@ class ChromaClient:
         references: list[dict],
         assignment_id: str,
         embeddings: list[list[float]],
-        force_regenerate: bool = False
+        force_regenerate: bool = False,
     ) -> bool:
         """
         Stores teacher technical feedback references per micro skill.
         Generated once in Phase 1 — reused for every student in Phase 2.
         Never overwrites without explicit force_regenerate flag.
+        Regenerating teacher references clears only teacher references.
         """
         if not self._validate_reference_payload(references, embeddings, assignment_id):
             return False
@@ -323,23 +423,21 @@ class ChromaClient:
         try:
             self._ensure_initialized()
 
-            existing = self.references_collection.get(
-                where={"assignment_id": assignment_id}
-            )
+            existing = self.references_collection.get(where={"assignment_id": assignment_id})
             existing_documents = existing.get("documents", [])
 
             if existing_documents and not force_regenerate:
                 engine_logger.warning(
                     f"CHROMA: Teacher references already exist for '{assignment_id}'. "
-                    f"Use force_regenerate=True to overwrite."
+                    "Use force_regenerate=True to overwrite."
                 )
                 return False
 
             if existing_documents and force_regenerate:
-                if not self.clear_assignment(assignment_id):
+                if not self.clear_teacher_references(assignment_id):
                     engine_logger.error(
-                        f"CHROMA: Failed to clear existing data for '{assignment_id}' "
-                        f"before regenerating teacher references."
+                        f"CHROMA: Failed to clear existing teacher references for "
+                        f"'{assignment_id}' before regenerating."
                     )
                     return False
 
@@ -349,10 +447,10 @@ class ChromaClient:
                 {
                     "assignment_id": assignment_id,
                     "skill_index": index,
-                    "rank": reference.get("rank", index + 1),
+                    "rank": reference["rank"],
                     "status": "PASS",
-                    "line_start": reference.get("line_start", 0),
-                    "line_end": reference.get("line_end", 0),
+                    "line_start": reference["line_start"],
+                    "line_end": reference["line_end"],
                 }
                 for index, reference in enumerate(references)
             ]
@@ -361,7 +459,7 @@ class ChromaClient:
                 ids=ids,
                 documents=documents,
                 embeddings=embeddings,
-                metadatas=metadatas
+                metadatas=metadatas,
             )
 
             engine_logger.info(
@@ -370,20 +468,24 @@ class ChromaClient:
             )
             return True
 
-        except Exception as e:
-            engine_logger.error(f"CHROMA: store_teacher_references failed: {e}")
+        except Exception as exc:
+            engine_logger.error(f"CHROMA: store_teacher_references failed: {exc}")
             return False
 
     def retrieve_teacher_reference(
         self,
         assignment_id: str,
-        skill_rank: int
+        skill_rank: int,
     ) -> dict | None:
         """
         Retrieves teacher reference for one specific skill by rank.
         Called by Agent 2 during verification loop per micro skill.
         """
         if not self._is_valid_assignment_id(assignment_id):
+            return None
+
+        if not self._is_valid_positive_int(skill_rank):
+            engine_logger.error("CHROMA: skill_rank must be a positive integer.")
             return None
 
         try:
@@ -393,7 +495,7 @@ class ChromaClient:
                 where={
                     "$and": [
                         {"assignment_id": assignment_id},
-                        {"rank": skill_rank}
+                        {"rank": skill_rank},
                     ]
                 }
             )
@@ -415,17 +517,16 @@ class ChromaClient:
                 "rank": metadata.get("rank", skill_rank),
                 "line_start": metadata.get("line_start", 0),
                 "line_end": metadata.get("line_end", 0),
-                "status": metadata.get("status", "PASS")
+                "status": metadata.get("status", "PASS"),
             }
 
-        except Exception as e:
-            engine_logger.error(f"CHROMA: retrieve_teacher_reference failed: {e}")
+        except Exception as exc:
+            engine_logger.error(f"CHROMA: retrieve_teacher_reference failed: {exc}")
             return None
 
-    def clear_assignment(self, assignment_id: str) -> bool:
+    def clear_micro_skills(self, assignment_id: str) -> bool:
         """
-        Clears all micro skills and teacher references for an assignment.
-        Required before force regeneration.
+        Clears only micro skills for an assignment.
         """
         if not self._is_valid_assignment_id(assignment_id):
             return False
@@ -433,28 +534,65 @@ class ChromaClient:
         try:
             self._ensure_initialized()
 
-            skills = self.skills_collection.get(
-                where={"assignment_id": assignment_id}
-            )
+            skills = self.skills_collection.get(where={"assignment_id": assignment_id})
             skill_ids = skills.get("ids", [])
             if skill_ids:
                 self.skills_collection.delete(ids=skill_ids)
 
-            references = self.references_collection.get(
-                where={"assignment_id": assignment_id}
+            engine_logger.info(
+                f"CHROMA: Cleared micro skills for assignment '{assignment_id}'."
             )
+            return True
+
+        except Exception as exc:
+            engine_logger.error(f"CHROMA: clear_micro_skills failed: {exc}")
+            return False
+
+    def clear_teacher_references(self, assignment_id: str) -> bool:
+        """
+        Clears only teacher references for an assignment.
+        """
+        if not self._is_valid_assignment_id(assignment_id):
+            return False
+
+        try:
+            self._ensure_initialized()
+
+            references = self.references_collection.get(where={"assignment_id": assignment_id})
             reference_ids = references.get("ids", [])
             if reference_ids:
                 self.references_collection.delete(ids=reference_ids)
 
             engine_logger.info(
-                f"CHROMA: Cleared all data for assignment '{assignment_id}'."
+                f"CHROMA: Cleared teacher references for assignment '{assignment_id}'."
             )
             return True
 
-        except Exception as e:
-            engine_logger.error(f"CHROMA: clear_assignment failed: {e}")
+        except Exception as exc:
+            engine_logger.error(f"CHROMA: clear_teacher_references failed: {exc}")
             return False
+
+    def clear_assignment(self, assignment_id: str) -> bool:
+        """
+        Clears all micro skills and teacher references for an assignment.
+        Required before full force regeneration.
+        """
+        if not self._is_valid_assignment_id(assignment_id):
+            return False
+
+        skills_cleared = self.clear_micro_skills(assignment_id)
+        references_cleared = self.clear_teacher_references(assignment_id)
+
+        if not skills_cleared or not references_cleared:
+            engine_logger.error(
+                f"CHROMA: Failed to fully clear assignment '{assignment_id}'."
+            )
+            return False
+
+        engine_logger.info(
+            f"CHROMA: Cleared all data for assignment '{assignment_id}'."
+        )
+        return True
 
 
 _chroma_client_instance = None

@@ -6,13 +6,30 @@ Ensures the RAG pipeline never processes empty, missing, or malicious files.
 
 from pathlib import Path
 
+from backend.config.constants import (
+    ALLOWED_INPUT_FILE_EXTENSIONS,
+    DEFAULT_FILE_ENCODING,
+    PROHIBITED_CONTENT_KEYWORDS,
+)
 from backend.utils.logger import engine_logger
 
-# TODO:
-# Move these fixed literals into backend/config/constants.py
-# to fully comply with Single Source of Truth.
-ALLOWED_EXTENSIONS = {".c", ".md"}
-PROHIBITED_KEYWORDS = ["system(", "popen(", "exec(", "fork(", "execve("]
+
+def _normalize_expected_extension(expected_ext: str | None) -> str | None:
+    """
+    Normalizes an expected extension to lowercase dotted format.
+    Example: 'c' -> '.c'
+    """
+    if expected_ext is None:
+        return None
+
+    normalized_expected_ext = expected_ext.strip().lower()
+    if not normalized_expected_ext:
+        return None
+
+    if not normalized_expected_ext.startswith("."):
+        normalized_expected_ext = f".{normalized_expected_ext}"
+
+    return normalized_expected_ext
 
 
 def validate_file_input(file_path: str, expected_ext: str | None = None) -> bool:
@@ -37,21 +54,19 @@ def validate_file_input(file_path: str, expected_ext: str | None = None) -> bool
             return False
 
         suffix = path.suffix.lower()
-
-        if suffix not in ALLOWED_EXTENSIONS:
+        if suffix not in ALLOWED_INPUT_FILE_EXTENSIONS:
             engine_logger.error(
                 f"SECURITY: Unsupported file extension for {file_path}. "
-                f"Allowed: {sorted(ALLOWED_EXTENSIONS)}"
+                f"Allowed: {sorted(ALLOWED_INPUT_FILE_EXTENSIONS)}"
             )
             return False
 
-        if expected_ext:
-            normalized_expected_ext = expected_ext.lower()
-
-            if normalized_expected_ext not in ALLOWED_EXTENSIONS:
+        normalized_expected_ext = _normalize_expected_extension(expected_ext)
+        if normalized_expected_ext:
+            if normalized_expected_ext not in ALLOWED_INPUT_FILE_EXTENSIONS:
                 engine_logger.error(
                     f"SECURITY: Invalid expected extension rule '{expected_ext}'. "
-                    f"Allowed rules: {sorted(ALLOWED_EXTENSIONS)}"
+                    f"Allowed rules: {sorted(ALLOWED_INPUT_FILE_EXTENSIONS)}"
                 )
                 return False
 
@@ -69,8 +84,8 @@ def validate_file_input(file_path: str, expected_ext: str | None = None) -> bool
         engine_logger.info(f"SECURITY: File validated successfully: {file_path}")
         return True
 
-    except Exception as e:
-        engine_logger.error(f"SECURITY: File validation failed for {file_path}: {e}")
+    except Exception as exc:
+        engine_logger.error(f"SECURITY: File validation failed for {file_path}: {exc}")
         return False
 
 
@@ -78,7 +93,7 @@ def validate_all_input_files(
     instructions_path: str,
     starter_path: str,
     teacher_path: str,
-    student_path: str | None = None
+    student_path: str | None = None,
 ) -> bool:
     """
     Validates all required input files before pipeline execution.
@@ -95,9 +110,7 @@ def validate_all_input_files(
 
     for file_path, expected_ext in files_to_validate:
         if not validate_file_input(file_path, expected_ext):
-            engine_logger.error(
-                "SECURITY: Input validation failed. Pipeline aborted."
-            )
+            engine_logger.error("SECURITY: Input validation failed. Pipeline aborted.")
             return False
 
     engine_logger.info("SECURITY: All input files validated successfully.")
@@ -113,14 +126,14 @@ def is_content_safe(content: str, file_path: str = "") -> bool:
     try:
         if content is None:
             engine_logger.warning(
-                f"SECURITY: Content safety check skipped because content is None "
+                "SECURITY: Content safety check skipped because content is None "
                 f"for {file_path or 'content'}."
             )
             return True
 
         lowered_content = content.lower()
 
-        for keyword in PROHIBITED_KEYWORDS:
+        for keyword in PROHIBITED_CONTENT_KEYWORDS:
             if keyword.lower() in lowered_content:
                 engine_logger.warning(
                     f"SECURITY: Prohibited keyword '{keyword}' found in "
@@ -129,9 +142,10 @@ def is_content_safe(content: str, file_path: str = "") -> bool:
 
         return True
 
-    except Exception as e:
+    except Exception as exc:
         engine_logger.error(
-            f"SECURITY: Content safety check failed for {file_path or 'content'}: {e}"
+            f"SECURITY: Content safety check failed for "
+            f"{file_path or 'content'}: {exc}"
         )
         return True
 
@@ -147,13 +161,11 @@ def safe_read_file(file_path: str, expected_ext: str | None = None) -> str | Non
     try:
         path = Path(file_path)
 
-        with path.open("r", encoding="utf-8") as file:
+        with path.open("r", encoding=DEFAULT_FILE_ENCODING) as file:
             content = file.read()
 
         if not content.strip():
-            engine_logger.error(
-                f"SECURITY: File contains only whitespace: {file_path}"
-            )
+            engine_logger.error(f"SECURITY: File contains only whitespace: {file_path}")
             return None
 
         is_content_safe(content, file_path)
@@ -161,6 +173,6 @@ def safe_read_file(file_path: str, expected_ext: str | None = None) -> str | Non
         engine_logger.info(f"SECURITY: File read successfully: {file_path}")
         return content
 
-    except Exception as e:
-        engine_logger.error(f"SECURITY: Failed to read file {file_path}: {e}")
+    except Exception as exc:
+        engine_logger.error(f"SECURITY: Failed to read file {file_path}: {exc}")
         return None

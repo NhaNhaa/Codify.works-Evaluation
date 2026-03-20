@@ -17,18 +17,21 @@ import re
 
 from openai import OpenAI
 
-from backend.config.config import get_provider_config, get_model
+from backend.config import config  # for LLM settings
+from backend.config.config import get_model, get_provider_config
 from backend.config.constants import (
-    HIGH_WEIGHT_THRESHOLD,
-    FEEDBACK_TONE,
+    FEEDBACK_FAIL_MAX_SENTENCES_PER_SECTION,
     FEEDBACK_LANGUAGE,
     FEEDBACK_PASS_MAX_SENTENCES,
-    FEEDBACK_FAIL_MAX_SENTENCES_PER_SECTION,
+    FEEDBACK_TONE,
+    HIGH_WEIGHT_THRESHOLD,
     MAX_SELF_CHECK_ATTEMPTS,
+    STATUS_FAIL,
+    STATUS_PASS,
 )
-from backend.utils.logger import engine_logger
 from backend.utils.formatter import build_output
 from backend.utils.llm_client import call_llm_with_retry
+from backend.utils.logger import engine_logger
 
 
 class FeedbackWriter:
@@ -45,7 +48,7 @@ class FeedbackWriter:
         provider = get_provider_config()
         self.client = OpenAI(
             base_url=provider["base_url"],
-            api_key=provider["api_key"]
+            api_key=provider["api_key"],
         )
         self.model = get_model("agent3_feedback_writer")
         engine_logger.info("AGENT 3: FeedbackWriter initialized.")
@@ -76,7 +79,10 @@ class FeedbackWriter:
 
         sorted_skills = sorted(
             skills,
-            key=lambda skill: (-skill.get("weight", 0), skill.get("rank", 999))
+            key=lambda skill: (
+                -self._safe_int(skill.get("weight", 0), 0),
+                self._safe_int(skill.get("rank", 999), 999),
+            ),
         )
 
         enriched_skills = []
@@ -87,7 +93,7 @@ class FeedbackWriter:
         final_result = {
             "student_id": student_id,
             "assignment_id": assignment_id,
-            "skills": enriched_skills
+            "skills": enriched_skills,
         }
 
         output = build_output(final_result)
@@ -105,8 +111,8 @@ class FeedbackWriter:
         Enforces sentence limits via Python after LLM returns.
         """
         skill_text = skill.get("skill", skill.get("text", "Unknown Skill"))
-        status = str(skill.get("status", "FAIL")).strip().upper()
-        weight = skill.get("weight", 1)
+        status = str(skill.get("status", STATUS_FAIL)).strip().upper()
+        weight = self._safe_int(skill.get("weight", 1), 1)
 
         engine_logger.info(
             f"AGENT 3: Writing feedback for skill: '{skill_text}' "
@@ -125,10 +131,10 @@ class FeedbackWriter:
                 skill_text=skill_text,
                 status=status,
                 weight=weight,
-                feedback=feedback
+                feedback=feedback,
             )
 
-            if not approved:
+            if not approved and attempts < MAX_SELF_CHECK_ATTEMPTS:
                 engine_logger.warning(
                     f"AGENT 3: Self-check failed for '{skill_text}'. "
                     f"Rewriting (attempt {attempts}/{MAX_SELF_CHECK_ATTEMPTS})."
@@ -138,7 +144,7 @@ class FeedbackWriter:
         if not approved:
             engine_logger.warning(
                 f"AGENT 3: Max self-check attempts reached for '{skill_text}'. "
-                f"Accepting best feedback found."
+                "Accepting best reviewed feedback found."
             )
 
         feedback = self._sanitize_feedback_precision(feedback, skill)
@@ -156,14 +162,14 @@ class FeedbackWriter:
         deterministic_feedback = self._build_deterministic_feedback(skill)
         if deterministic_feedback is not None:
             engine_logger.info(
-                f"AGENT 3: Deterministic feedback used for skill: "
+                "AGENT 3: Deterministic feedback used for skill: "
                 f"'{skill.get('skill', skill.get('text', 'Unknown Skill'))}'."
             )
             return deterministic_feedback
 
         skill_text = skill.get("skill", skill.get("text", "Unknown Skill"))
-        status = str(skill.get("status", "FAIL")).strip().upper()
-        weight = skill.get("weight", 1)
+        status = str(skill.get("status", STATUS_FAIL)).strip().upper()
+        weight = self._safe_int(skill.get("weight", 1), 1)
         snippet = skill.get("student_snippet", "")
         fix = skill.get("recommended_fix", "")
         technical_feedback = skill.get("feedback", "")
@@ -176,7 +182,7 @@ class FeedbackWriter:
             else "Relevant section"
         )
 
-        if status == "PASS":
+        if status == STATUS_PASS:
             max_sentences = FEEDBACK_PASS_MAX_SENTENCES
             task_rule = (
                 "Write concise positive technical feedback. "
@@ -208,27 +214,27 @@ class FeedbackWriter:
         system_message = (
             f"You are a {FEEDBACK_TONE}. "
             f"You write in {FEEDBACK_LANGUAGE} only.\n\n"
-            f"ROLE:\n"
-            f"- Write pedagogical feedback for one C programming micro skill.\n"
-            f"- Preserve the exact technical meaning of the technical verdict summary.\n"
-            f"- Never broaden the claim beyond the isolated skill being evaluated.\n\n"
-            f"OUTPUT FORMAT:\n"
-            f"- Return ONLY plain feedback text.\n"
-            f"- No JSON.\n"
-            f"- No markdown fences.\n"
-            f"- No section labels.\n"
-            f"- No bullet points.\n\n"
-            f"HARD CONSTRAINTS:\n"
+            "ROLE:\n"
+            "- Write pedagogical feedback for one C programming micro skill.\n"
+            "- Preserve the exact technical meaning of the technical verdict summary.\n"
+            "- Never broaden the claim beyond the isolated skill being evaluated.\n\n"
+            "OUTPUT FORMAT:\n"
+            "- Return ONLY plain feedback text.\n"
+            "- No JSON.\n"
+            "- No markdown fences.\n"
+            "- No section labels.\n"
+            "- No bullet points.\n\n"
+            "HARD CONSTRAINTS:\n"
             f"- Maximum {max_sentences} sentence(s).\n"
-            f"- Every sentence must have technical value.\n"
-            f"- Be warm, supportive, and precise.\n"
-            f"- Refer to the student's code when possible.\n"
-            f"- Do not invent any fix.\n"
-            f"- Do not mention other skills.\n"
-            f"- Do not claim the whole program is correct or incorrect.\n"
-            f"- Do not claim the final array/output is correct unless that is explicitly supported.\n"
-            f"- Do not say a value moved to the front/back unless the provided evidence clearly supports it.\n"
-            f"- Evaluate only this one skill."
+            "- Every sentence must have technical value.\n"
+            "- Be warm, supportive, and precise.\n"
+            "- Refer to the student's code when possible.\n"
+            "- Do not invent any fix.\n"
+            "- Do not mention other skills.\n"
+            "- Do not claim the whole program is correct or incorrect.\n"
+            "- Do not claim the final array/output is correct unless that is explicitly supported.\n"
+            "- Do not say a value moved to the front/back unless the provided evidence clearly supports it.\n"
+            "- Evaluate only this one skill."
         )
 
         user_message = f"""Micro Skill: {skill_text}
@@ -256,19 +262,19 @@ Return ONLY the feedback text."""
             model=self.model,
             messages=[
                 {"role": "system", "content": system_message},
-                {"role": "user", "content": user_message}
+                {"role": "user", "content": user_message},
             ],
-            temperature=0.1,
-            agent_label="AGENT 3"
+            temperature=config.LLM_TEMPERATURE,          # use global setting
+            # no response_format – expects plain text
+            agent_label="AGENT 3",
         )
 
         if content is None:
             engine_logger.error(
                 f"AGENT 3: Feedback generation failed for '{skill_text}' — "
-                f"LLM returned no response."
+                "LLM returned no response."
             )
-            fallback = self._build_fallback_feedback(skill)
-            return fallback
+            return self._build_fallback_feedback(skill)
 
         feedback = content.strip()
 
@@ -283,59 +289,59 @@ Return ONLY the feedback text."""
         wording drift can easily create inaccurate claims.
         """
         skill_text = skill.get("skill", skill.get("text", "Unknown Skill"))
-        status = str(skill.get("status", "FAIL")).strip().upper()
+        status = str(skill.get("status", STATUS_FAIL)).strip().upper()
         family = self._detect_skill_family(skill_text)
 
-        if family == "shift_transform" and status == "PASS":
+        if family == "shift_transform" and status == STATUS_PASS:
             return (
                 "You correctly used the left-shift copy pattern inside the loop, "
                 "and starting at i = 1 keeps arr[i - 1] within bounds. "
                 "That demonstrates the required shift step for this skill."
             )
 
-        if family == "shift_transform" and status == "FAIL":
+        if family == "shift_transform" and status == STATUS_FAIL:
             return (
                 "This code does not clearly show the required left-shift copy step for "
                 "this skill. The relevant lines should move each value left by copying "
                 "arr[i] into arr[i - 1] in a valid loop."
             )
 
-        if family == "shift_temp_safety" and status == "FAIL":
+        if family == "shift_temp_safety" and status == STATUS_FAIL:
             return (
                 "Your loop overwrites the original arr[0] before it is saved, so the "
                 "value that should move to the last position is lost. "
                 "A temporary variable is needed to preserve that original first element before shifting."
             )
 
-        if family == "shift_temp_safety" and status == "PASS":
+        if family == "shift_temp_safety" and status == STATUS_PASS:
             return (
                 "You preserved the original first element before shifting the array, "
                 "so the value needed for the last position is not lost. "
                 "That is the key data-safety step for this skill."
             )
 
-        if family == "scanf_input" and status == "PASS":
+        if family == "scanf_input" and status == STATUS_PASS:
             return (
                 "You correctly used scanf with &arr[i] inside the loop so each input "
                 "is stored directly in the correct array cell. "
                 "Running the loop five times matches the requirement to read five integers."
             )
 
-        if family == "scanf_input" and status == "FAIL":
+        if family == "scanf_input" and status == STATUS_FAIL:
             return (
                 "This skill requires using scanf with &arr[i] to read each integer "
                 "directly into the array. "
                 "The current code does not show that input pattern clearly."
             )
 
-        if family == "array_index" and status == "PASS":
+        if family == "array_index" and status == STATUS_PASS:
             return (
                 "You correctly used array index notation to access the intended array "
                 "element for this operation. "
                 "That demonstrates the required arr[i] access pattern for this skill."
             )
 
-        if family == "array_index" and status == "FAIL":
+        if family == "array_index" and status == STATUS_FAIL:
             return (
                 "This code does not clearly demonstrate the required array index access "
                 "pattern for this skill. "
@@ -352,8 +358,8 @@ Return ONLY the feedback text."""
         if deterministic_feedback is not None:
             return deterministic_feedback
 
-        status = str(skill.get("status", "FAIL")).strip().upper()
-        if status == "PASS":
+        status = str(skill.get("status", STATUS_FAIL)).strip().upper()
+        if status == STATUS_PASS:
             return "Your code correctly demonstrates this skill."
         return "This code does not fully demonstrate the required skill."
 
@@ -376,7 +382,7 @@ Return ONLY the feedback text."""
             "final output is correct",
             "final array is correct",
             "preserved the last element",
-            "wrapped correctly"
+            "wrapped correctly",
         ]
 
         if any(phrase in lowered for phrase in risky_phrases):
@@ -393,7 +399,7 @@ Return ONLY the feedback text."""
                     r"\bplaced at the front\b",
                     "placed in the last position",
                     cleaned,
-                    flags=re.IGNORECASE
+                    flags=re.IGNORECASE,
                 )
 
         return cleaned
@@ -408,16 +414,17 @@ Return ONLY the feedback text."""
         if not feedback or not feedback.strip():
             return feedback
 
-        if status == "PASS":
-            limit = FEEDBACK_PASS_MAX_SENTENCES
-        else:
-            limit = FEEDBACK_FAIL_MAX_SENTENCES_PER_SECTION
+        limit = (
+            FEEDBACK_PASS_MAX_SENTENCES
+            if status == STATUS_PASS
+            else FEEDBACK_FAIL_MAX_SENTENCES_PER_SECTION
+        )
 
         truncated = self._truncate_to_sentences(feedback, limit)
 
         if truncated != feedback:
             engine_logger.info(
-                f"AGENT 3: Python enforced sentence limit — "
+                "AGENT 3: Python enforced sentence limit — "
                 f"truncated to {limit} sentence(s)."
             )
 
@@ -431,7 +438,7 @@ Return ONLY the feedback text."""
         if not text or not text.strip():
             return text
 
-        sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text.strip())
+        sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])", text.strip())
 
         if len(sentences) <= max_sentences:
             return text.strip()
@@ -464,7 +471,7 @@ Return ONLY the feedback text."""
         skill_text: str,
         status: str,
         weight: int,
-        feedback: str
+        feedback: str,
     ) -> bool:
         """
         Agent 3 checks its own feedback quality.
@@ -472,7 +479,7 @@ Return ONLY the feedback text."""
         """
         max_sentences = (
             FEEDBACK_PASS_MAX_SENTENCES
-            if status == "PASS"
+            if status == STATUS_PASS
             else FEEDBACK_FAIL_MAX_SENTENCES_PER_SECTION
         )
 
@@ -507,15 +514,16 @@ HARD CONSTRAINTS:
             messages=[
                 {
                     "role": "system",
-                    "content": "You review C programming feedback quality and return JSON only."
+                    "content": "You review C programming feedback quality and return JSON only.",
                 },
                 {
                     "role": "user",
-                    "content": prompt
-                }
+                    "content": prompt,
+                },
             ],
-            temperature=0.1,
-            agent_label="AGENT 3"
+            temperature=config.LLM_TEMPERATURE,          # use global setting
+            response_format={"type": "json_object"},     # enforce JSON
+            agent_label="AGENT 3",
         )
 
         if content is None:
@@ -528,16 +536,22 @@ HARD CONSTRAINTS:
             result = json.loads(self._clean_json(content))
             approved = result.get("approved", False)
 
+            if not isinstance(approved, bool):
+                engine_logger.error(
+                    f"AGENT 3: Self-check returned non-boolean approved value for '{skill_text}'."
+                )
+                return True
+
             if not approved:
                 engine_logger.warning(
                     f"AGENT 3: Self-check rejected feedback for "
                     f"'{skill_text}': {result.get('reason', 'no reason given')}"
                 )
 
-            return bool(approved)
+            return approved
 
-        except Exception as e:
-            engine_logger.error(f"AGENT 3: Self-check parsing failed: {e}")
+        except Exception as exc:
+            engine_logger.error(f"AGENT 3: Self-check parsing failed: {exc}")
             return True
 
     @staticmethod
@@ -553,6 +567,16 @@ HARD CONSTRAINTS:
         cleaned = re.sub(r"^```\s*", "", cleaned)
         cleaned = re.sub(r"\s*```$", "", cleaned)
         return cleaned.strip()
+
+    @staticmethod
+    def _safe_int(value, default: int) -> int:
+        """
+        Safely converts a value to int.
+        """
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
 
 # ── GLOBAL INSTANCE (lazy) ─────────────────────────────────────────
